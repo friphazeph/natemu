@@ -1,6 +1,6 @@
-./build/**
-./roms/**
-*/*.old
-*/*.out
-*/*.ASM
+build/**
+roms/**
+*.old
+*.out
+*.ASM
 nob
