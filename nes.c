@@ -93,10 +93,12 @@ typedef struct {
 	size_t capacity;
 } Addrs;
 
-// bit 0 (0b0001): done
-// bit 1 (0b0010): code
-// bit 2 (0b0100): branch
-// bit 3 (0b1000): branch_done
+// bit 0 (0b000001): done
+// bit 1 (0b000010): code
+// bit 2 (0b000100): branch
+// bit 3 (0b001000): branch_done
+// bit 4 (0b010000): jsr
+// bit 5 (0b100000): jsr_dst
 typedef uint8_t AddrStatus;
 
 typedef struct {
@@ -109,8 +111,16 @@ typedef struct {
 typedef struct {
 	Bytes bytes;
 	Op op;
-	Addrs parents;
+	Addr loc;
 } Instr;
+
+void print_instr(Instr in) {
+	printf("0x%04X: %10s: ", in.loc, OP_DESCS[in.op].name);
+	for (size_t i = 0; i < in.bytes.count; i++) {
+		printf("0x%02X ", in.bytes.items[i]);
+	}
+	putchar('\n');
+}
 
 typedef struct {
 	Instr *items;
@@ -119,11 +129,16 @@ typedef struct {
 } Instrs;
 
 typedef struct {
+	Addrs *items;
+	size_t count;
+	size_t capacity;
+} AddrArrays;
+
+typedef struct {
 	NesRom rom;
-	Addrs jumps;
-	Addr cur;
-	Instrs instrs;
-	AddrStatuses statuses;
+	Instrs instrs;         // Parallel arrays
+	AddrArrays parents;    // Parallel arrays
+	AddrStatuses statuses; // Parallel arrays
 } NesParser;
 
 NesParser create_parser(const char *path) {
@@ -132,17 +147,14 @@ NesParser create_parser(const char *path) {
 	size_t prg_len = p.rom.prg.count;
 	p.statuses.items = calloc(prg_len, sizeof(AddrStatus));
 	p.statuses.count = prg_len;
+	p.statuses.capacity = prg_len;
 	p.instrs.items = calloc(prg_len, sizeof(Instr));
 	p.instrs.count = prg_len;
+	p.instrs.capacity = prg_len;
+	p.parents.items = calloc(prg_len, sizeof(Addrs));
+	p.parents.count = prg_len;
+	p.parents.capacity = prg_len;
 
-	Addr start = (Addr) rom_read_at(&p.rom, 0xFFFC, sizeof(Addr));
-	p.cur = start;
-
-	Addr nmi = (Addr) rom_read_at(&p.rom, 0xFFFA, sizeof(Addr));
-	da_append(&p.jumps, nmi);
-
-	// Addr interrupt = (Addr) rom_read_at(&p.rom, 0xFFFE, sizeof(Addr));
-	// da_append(&p.jumps, interrupt);
 	return p;
 }
 
@@ -152,416 +164,331 @@ static inline bool is_done(NesParser *p, Addr addr) {
 	return p->statuses.items[addr-0x8000] & 0b1;
 }
 
-static inline void mark_done(NesParser *p, Addr addr) {
+static inline void set_done(NesParser *p, Addr addr) {
 	assert(addr >= 0x8000);
 	assert(addr <  0x8000 + p->statuses.count);
 	p->statuses.items[addr-0x8000] |= 0b1;
 	return;
 }
 
+static inline bool in_prg_range(NesParser *p, int32_t addr) {
+    return addr >= 0x8000 && addr < (int32_t)(0x8000 + (int32_t)p->parents.count);
+}
+
+static inline void set_code(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+    p->statuses.items[addr-0x8000] |= 0b10;
+}
+static inline void clear_code(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+    p->statuses.items[addr-0x8000] &= ~0b10;
+}
+static inline void set_branch(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+    p->statuses.items[addr-0x8000] |= 0b100;
+}
+static inline void clear_branch(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+    p->statuses.items[addr-0x8000] &= ~0b100;
+}
 static inline bool is_code(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
+    assert(in_prg_range(p, addr));
 	return p->statuses.items[addr-0x8000] & 0b10;
 }
 
-static inline void toggle_code(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
-	p->statuses.items[addr-0x8000] ^= 0b10;
-	return;
-}
-
 static inline bool is_branch(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
+    assert(in_prg_range(p, addr));
 	return p->statuses.items[addr-0x8000] & 0b100;
 }
 
-static inline void toggle_branch(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
-	p->statuses.items[addr-0x8000] ^= 0b100;
-	return;
-}
-
 static inline bool is_branch_done(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
+    assert(in_prg_range(p, addr));
 	return p->statuses.items[addr-0x8000] & 0b1000;
 }
 
-static inline void mark_branch_done(NesParser *p, Addr addr) {
-	assert(addr >= 0x8000);
-	assert(addr <  0x8000 + p->statuses.count);
+static inline void set_branch_done(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
 	p->statuses.items[addr-0x8000] |= 0b1000;
 	return;
 }
 
-void add_jump(NesParser *p, Addr jump) {
-	if (jump < 0x8000 ||
-		jump >=  0x8000 + p->statuses.count){
-		return;
-	}
-	if (!is_done(p, jump)) {
-		da_append(&p->jumps, jump);
-	}
+static inline bool is_jsr(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+	return p->statuses.items[addr-0x8000] & 0b10000;
 }
 
-// Calling this with p, p->cur_jump will automatically find the next to-do jump
-bool jump_to(NesParser *p, Addr jump) {
-	while (is_done(p, jump)) {
-		if (p->jumps.count <= 0) {
-			return false;
-		}
-		jump = da_last(&p->jumps);
-		p->jumps.count--;
-	}
-	// printf("0x%X done, jumping to 0x%X\n", p->cur_jump, jump);
-	p->cur = jump;
-	return true;
+static inline void set_jsr(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+	p->statuses.items[addr-0x8000] |= 0b10000;
+	return;
+}
+
+static inline bool is_jsr_dst(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+	return p->statuses.items[addr-0x8000] & 0b100000;
+}
+
+static inline void set_jsr_dst(NesParser *p, Addr addr) {
+    assert(in_prg_range(p, addr));
+	p->statuses.items[addr-0x8000] |= 0b100000;
+	return;
 }
 
 void illegal_branch(NesParser *p, Addr a) {
-	Addrs parents = p->instrs.items[a - 0x8000].parents;
-	for (size_t i = 0; i < parents.count; i++) {
-		Addr parent = parents.items[i];
+	Addrs *parents = &p->parents.items[a - 0x8000];
+	for (size_t i = 0; i < parents->count; i++) {
+		Addr parent = parents->items[i];
+		if (a == 0xFFFD) {
+			printf("0x%04X\n", parent);
+		}
 		if (!is_code(p, parent)) continue;
 		if (is_branch(p, parent)) {
+			if (is_jsr(p, parent) && is_jsr_dst(p, a)) {
+				clear_code(p, parent);
+				illegal_branch(p, parent);
+				continue;
+			}
 			if (is_branch_done(p, parent)) {
-				toggle_code(p, parent);
+				clear_code(p, parent);
 				illegal_branch(p, parent);
 			} else {
-				mark_branch_done(p, parent);
+				set_branch_done(p, parent);
 			}
 			continue;
 		}
-		toggle_code(p, parent);
+		clear_code(p, parent);
 		illegal_branch(p, parent);
 	}
 	return;	
 }
 
-void to_child(NesParser *p, Addr a) {
-	da_append(&p->instrs.items[p->cur - 0x8000].parents, a);
-	p->cur = a;
-}
-
-bool parse_op(NesParser *p, Op op) {
-	Instr ins = {0};
-	OpDesc op_desc = OP_DESCS[op];
-	if (op_desc.size == 0) { // Illegal instruction
-		printf("Unkown instruction: 0x%X at 0x%X\n", op, p->cur);
-		illegal_branch(p, p->cur);
-		return true;
-	}
-	toggle_code(p, p->cur);
-	printf("%X: %s\n    ", p->cur, op_desc.name);
-	for (size_t i = 0; i < op_desc.size; i++) {
-		da_append(&ins.bytes, rom_read_at(&p->rom, p->cur+i, sizeof(Byte)));
-		printf("%X ", ins.bytes.items[i]);
-	}
-	putchar('\n');
-
-	switch (op) {
+void set_parents(NesParser *p, Instr ins) {
+	switch (ins.op) {
 		case JMP_ABS: {
 			Addr jump_addr = ins.bytes.items[1] | ins.bytes.items[2] << 8;
-			// if (!jump_to(p, jump_addr)) {
-			// 	return false;
-			// }
-			to_child(p, jump_addr);
-			p->instrs.items[p->cur-0x8000] = ins;
-			return true;
-		} break;
-		case JMP_IND: {
-			if (!jump_to(p, p->cur)) { // this will find the next to-do jump
-				return false;
+			if (in_prg_range(p, jump_addr)) {
+				Addrs *parents = &p->parents.items[jump_addr-0x8000];
+				da_append(parents, ins.loc);
 			}
-			p->instrs.items[p->cur-0x8000] = ins;
-			return true;
+			return;
+		} break;
+		case JMP_IND: { // We don't know ehre it jumps, so no explicit child
+			return;
 		} break;
 		case JSR: {
-			toggle_branch(p, p->cur);
 			Addr jump_addr = ins.bytes.items[1] | ins.bytes.items[2] << 8;
-			add_jump(p, jump_addr);
+			if (in_prg_range(p, jump_addr)) {
+				set_jsr(p, ins.loc);
+				set_jsr_dst(p, jump_addr);
+				Addrs *parents = &p->parents.items[jump_addr-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				clear_code(p, ins.loc);
+			}
 		} break;
 		case BCC: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BCS: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BEQ: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BMI: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BNE: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BPL: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BVC: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BVS: {
-			toggle_branch(p, p->cur);
 			int8_t offs = ins.bytes.items[1];
-			add_jump(p, p->cur + 2 + offs);
+			if (in_prg_range(p, ins.loc + 2 + offs)) {
+				set_branch(p, ins.loc);
+				Addrs *parents = &p->parents.items[ins.loc + 2 + offs-0x8000];
+				da_append(parents, ins.loc);
+			} else {
+				set_branch_done(p, ins.loc);
+			}
 		} break;
 		case BRK: {
-			if (!jump_to(p, p->cur)) { // this will find the next to-do jump
-				return false;
-			}
-			p->instrs.items[p->cur-0x8000] = ins;
-			return true;
+			return;
 		} break;
 		case RTS: {
-			if (!jump_to(p, p->cur)) { // this will find the next to-do jump
-				return false;
-			}
-			p->instrs.items[p->cur-0x8000] = ins;
-			return true;
+			return;
 		} break;
 		case RTI: {
-			if (!jump_to(p, p->cur)) { // this will find the next to-do jump
-				return false;
-			}
-			p->instrs.items[p->cur-0x8000] = ins;
-			return true;
+			return;
 		} break;
-        case ADC_IMM   : break;
-        case ADC_ZP    : break;
-        case ADC_ZP_X  : break;
-        case ADC_ABS   : break;
-        case ADC_ABS_X : break;
-        case ADC_ABS_Y : break;
-        case ADC_IND_X : break;
-        case ADC_IND_Y : break;
-
-        // AND
-        case AND_IMM   : break;
-        case AND_ZP    : break;
-        case AND_ZP_X  : break;
-        case AND_ABS   : break;
-        case AND_ABS_X : break;
-        case AND_ABS_Y : break;
-        case AND_IND_X : break;
-        case AND_IND_Y : break;
-
-        // ASL
-        case ASL_ACC   : break;
-        case ASL_ZP    : break;
-        case ASL_ZP_X  : break;
-        case ASL_ABS   : break;
-        case ASL_ABS_X : break;
-
-        // BIT
-        case BIT_ZP    : break;
-        case BIT_ABS   : break;
-
-        case CLC       : break;
-        case CLD       : break;
-        case CLI       : break;
-        case CLV       : break;
-
-        // CMP
-        case CMP_IMM   : break;
-        case CMP_ZP    : break;
-        case CMP_ZP_X  : break;
-        case CMP_ABS   : break;
-        case CMP_ABS_X : break;
-        case CMP_ABS_Y : break;
-        case CMP_IND_X : break;
-        case CMP_IND_Y : break;
-
-        // CPX
-        case CPX_IMM   : break;
-        case CPX_ZP    : break;
-        case CPX_ABS   : break;
-
-        // CPY
-        case CPY_IMM   : break;
-        case CPY_ZP    : break;
-        case CPY_ABS   : break;
-
-        // DEC
-        case DEC_ZP    : break;
-        case DEC_ZP_X  : break;
-        case DEC_ABS   : break;
-        case DEC_ABS_X : break;
-
-        case DEX       : break;
-        case DEY       : break;
-
-        // EOR
-        case EOR_IMM   : break;
-        case EOR_ZP    : break;
-        case EOR_ZP_X  : break;
-        case EOR_ABS   : break;
-        case EOR_ABS_X : break;
-        case EOR_ABS_Y : break;
-        case EOR_IND_X : break;
-        case EOR_IND_Y : break;
-
-        // INC
-        case INC_ZP    : break;
-        case INC_ZP_X  : break;
-        case INC_ABS   : break;
-        case INC_ABS_X : break;
-
-        case INX       : break;
-        case INY       : break;
-
-        // LDA
-        case LDA_IMM   : break;
-        case LDA_ZP    : break;
-        case LDA_ZP_X  : break;
-        case LDA_ABS   : break;
-        case LDA_ABS_X : break;
-        case LDA_ABS_Y : break;
-        case LDA_IND_X : break;
-        case LDA_IND_Y : break;
-
-        // LDX
-        case LDX_IMM   : break;
-        case LDX_ZP    : break;
-        case LDX_ZP_Y  : break;
-        case LDX_ABS   : break;
-        case LDX_ABS_Y : break;
-
-        // LDY
-        case LDY_IMM   : break;
-        case LDY_ZP    : break;
-        case LDY_ZP_X  : break;
-        case LDY_ABS   : break;
-        case LDY_ABS_X : break;
-
-        // LSR
-        case LSR_ACC   : break;
-        case LSR_ZP    : break;
-        case LSR_ZP_X  : break;
-        case LSR_ABS   : break;
-        case LSR_ABS_X : break;
-
-        case NOP       : break;
-
-        // ORA
-        case ORA_IMM   : break;
-        case ORA_ZP    : break;
-        case ORA_ZP_X  : break;
-        case ORA_ABS   : break;
-        case ORA_ABS_X : break;
-        case ORA_ABS_Y : break;
-        case ORA_IND_X : break;
-        case ORA_IND_Y : break;
-
-        case PHA       : break;
-        case PHP       : break;
-        case PLA       : break;
-        case PLP       : break;
-
-        // ROL
-        case ROL_ACC   : break;
-        case ROL_ZP    : break;
-        case ROL_ZP_X  : break;
-        case ROL_ABS   : break;
-        case ROL_ABS_X : break;
-
-        // ROR
-        case ROR_ACC   : break;
-        case ROR_ZP    : break;
-        case ROR_ZP_X  : break;
-        case ROR_ABS   : break;
-        case ROR_ABS_X : break;
-
-        // SBC
-        case SBC_IMM   : break;
-        case SBC_ZP    : break;
-        case SBC_ZP_X  : break;
-        case SBC_ABS   : break;
-        case SBC_ABS_X : break;
-        case SBC_ABS_Y : break;
-        case SBC_IND_X : break;
-        case SBC_IND_Y : break;
-
-        case SEC       : break;
-        case SED       : break;
-        case SEI       : break;
-
-        // STA
-        case STA_ZP    : break;
-        case STA_ZP_X  : break;
-        case STA_ABS   : break;
-        case STA_ABS_X : break;
-        case STA_ABS_Y : break;
-        case STA_IND_X : break;
-        case STA_IND_Y : break;
-
-        // STX
-        case STX_ZP    : break;
-        case STX_ZP_Y  : break;
-        case STX_ABS   : break;
-
-        // STY
-        case STY_ZP    : break;
-        case STY_ZP_Y  : break;
-        case STY_ABS   : break;
-
-        case TAX       : break;
-        case TAY       : break;
-        case TSX       : break;
-        case TXA       : break;
-        case TXS       : break;
-        case TYA       : break;
+		default: break;
 	}
-	to_child(p, p->cur + op_desc.size);
-	p->instrs.items[p->cur-0x8000] = ins;
-	return true;
+	OpDesc op_desc = OP_DESCS[ins.op];
+	if (in_prg_range(p, ins.loc + op_desc.size)) {
+		Addrs *parents = &p->parents.items[ins.loc + op_desc.size - 0x8000];
+		da_append(parents, ins.loc);
+	} else {
+		if (is_branch(p, ins.loc)) {
+			if (is_branch_done(p, ins.loc)) {
+				clear_code(p, ins.loc);
+			}
+		} else {
+			clear_code(p, ins.loc);
+		}
+	}
+	return;
 }
 
-bool jump_next_not_done(NesParser *p) {
-	for (size_t i = 0; i < p->rom.prg.count; i++) {
-		Addr a = i + 0x8000;
-		if (!is_done(p, a)) {
-			p->cur = a;
-			return true;
-		}
+bool is_parent(NesParser *p, Instr in, Instr par) {
+	if (!in_prg_range(p, in.loc)) return false;
+	Addrs parents = p->parents.items[in.loc-0x8000];
+	for (size_t i = 0; i < parents.count; i++) {
+		Addr parent = parents.items[i];
+		if (parent == par.loc) return true;
 	}
 	return false;
 }
 
-bool parser_next_instr(NesParser *p) {
-	if (is_done(p, p->cur)) {
-		if (!jump_to(p, p->cur)) {
-			if (!jump_next_not_done(p)) {
-				return false;
+void print_branches(NesParser *p) {
+	size_t prg_len = p->rom.prg.count;
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		if (!is_code(p, a)) continue;
+		if (is_done(p, a)) continue;
+		set_done(p, a);
+
+		Instr ins = p->instrs.items[i];
+		printf("\n===== Instruction set at 0x%04X =====\n\n", ins.loc);
+		print_instr(ins);
+		size_t offs = i+OP_DESCS[ins.op].size;
+		Instr next = p->instrs.items[offs];
+		while (is_parent(p, next, ins)) {
+			if (is_done(p, next.loc)) {
+				printf("0x%04X: ... (attaches to already printed valid branch)\n", next.loc);
+				break;
 			}
+			set_done(p, next.loc);
+			print_instr(next);
+			ins = next;
+			offs += OP_DESCS[ins.op].size;
+			next = p->instrs.items[offs];
 		}
 	}
-	mark_done(p, p->cur);
-	Op op = (Op) rom_read_at(&p->rom, p->cur, sizeof(Byte));
-	return parse_op(p, op);
+}
+
+void print_instrs(NesParser *p) {
+	size_t prg_len = p->rom.prg.count;
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		if (!is_code(p, a)) continue;
+
+		Instr ins = p->instrs.items[i];
+		print_instr(ins);
+	}
+}
+
+NesParser parse_file(const char *path) {
+	NesParser p = create_parser(path);
+	size_t prg_len = p.rom.prg.count;
+
+	// First pass
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		Op op = (Op) rom_read_at(&p.rom, a, sizeof(Byte));
+		OpDesc op_desc = OP_DESCS[op];
+		if (op_desc.size == 0) { // Illegal instruction
+			// printf("Unkown instruction: 0x%X at 0x%X\n", op, a);
+			continue;
+		}
+		set_code(&p, a);
+		Instr ins = {0};
+		for (size_t i = 0; i < op_desc.size; i++) {
+			da_append(&ins.bytes, rom_read_at(&p.rom, a+i, sizeof(Byte)));
+		}
+		ins.op = op;
+		ins.loc = a;
+		p.instrs.items[i] = ins;
+	}
+
+	// Second pass
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		if (!is_code(&p, a)) continue;
+
+		Instr ins = p.instrs.items[i];
+		set_parents(&p, ins);
+	}
+
+	// Third pass
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		if (is_code(&p, a)) continue;
+		illegal_branch(&p, a);
+	}
+
+	print_branches(&p);
+	// print_instrs(&p);
+	
+	return p;
 }
 
 int main(void) {
-	NesParser p = create_parser(ROMS_DIR"SMB.nes");
-	while(parser_next_instr(&p)) {}
+	// NesParser p = create_parser(ROMS_DIR"SMB.nes");
+	// while(parser_next_instr(&p)) {}
+	parse_file(ROMS_DIR"SMB.nes");
 	return 0;
 } 

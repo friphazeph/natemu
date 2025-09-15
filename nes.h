@@ -1,6 +1,9 @@
 #ifndef NES_H_
 #define NES_H_
 
+#include <stdint.h>
+#include <stddef.h>
+
 // ===== INES PARSING ===== //
 
 typedef uint8_t Byte;
