@@ -110,12 +110,12 @@ typedef struct {
 
 typedef struct {
 	Bytes bytes;
-	Op op;
+	OpKind op;
 	Addr loc;
 } Instr;
 
 void print_instr(Instr in) {
-	printf("0x%04X: %10s: ", in.loc, OP_DESCS[in.op].name);
+	printf("0x%04X: %10s: ", in.loc, OPS[in.op].name);
 	for (size_t i = 0; i < in.bytes.count; i++) {
 		printf("0x%02X ", in.bytes.items[i]);
 	}
@@ -139,6 +139,7 @@ typedef struct {
 	Instrs instrs;         // Parallel arrays
 	AddrArrays parents;    // Parallel arrays
 	AddrStatuses statuses; // Parallel arrays
+	Addr entry_point;
 } NesParser;
 
 NesParser create_parser(const char *path) {
@@ -154,6 +155,8 @@ NesParser create_parser(const char *path) {
 	p.parents.items = calloc(prg_len, sizeof(Addrs));
 	p.parents.count = prg_len;
 	p.parents.capacity = prg_len;
+	p.entry_point = rom_read_at(&p.rom, 0xFFFC, sizeof(Addr));
+	fprintf(stderr, "Entry: 0x%X\n", p.entry_point);
 
 	return p;
 }
@@ -377,7 +380,7 @@ void set_parents(NesParser *p, Instr ins) {
 		} break;
 		default: break;
 	}
-	OpDesc op_desc = OP_DESCS[ins.op];
+	Op op_desc = OPS[ins.op];
 	if (in_prg_range(p, ins.loc + op_desc.size)) {
 		Addrs *parents = &p->parents.items[ins.loc + op_desc.size - 0x8000];
 		da_append(parents, ins.loc);
@@ -414,7 +417,7 @@ void print_branches(NesParser *p) {
 		Instr ins = p->instrs.items[i];
 		printf("\n===== Instruction set at 0x%04X =====\n\n", ins.loc);
 		print_instr(ins);
-		size_t offs = i+OP_DESCS[ins.op].size;
+		size_t offs = i+OPS[ins.op].size;
 		Instr next = p->instrs.items[offs];
 		while (is_parent(p, next, ins)) {
 			if (is_done(p, next.loc)) {
@@ -424,7 +427,7 @@ void print_branches(NesParser *p) {
 			set_done(p, next.loc);
 			print_instr(next);
 			ins = next;
-			offs += OP_DESCS[ins.op].size;
+			offs += OPS[ins.op].size;
 			next = p->instrs.items[offs];
 		}
 	}
@@ -448,8 +451,8 @@ NesParser parse_file(const char *path) {
 	// First pass
 	for (size_t i = 0; i < prg_len; i++) {
 		Addr a = i + 0x8000;
-		Op op = (Op) rom_read_at(&p.rom, a, sizeof(Byte));
-		OpDesc op_desc = OP_DESCS[op];
+		OpKind op = (OpKind) rom_read_at(&p.rom, a, sizeof(Byte));
+		Op op_desc = OPS[op];
 		if (op_desc.size == 0) { // Illegal instruction
 			// printf("Unkown instruction: 0x%X at 0x%X\n", op, a);
 			continue;
@@ -480,15 +483,394 @@ NesParser parse_file(const char *path) {
 		illegal_branch(&p, a);
 	}
 
-	print_branches(&p);
+	// print_branches(&p);
 	// print_instrs(&p);
 	
 	return p;
 }
 
+void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
+	static const char *A = "al";
+	static const char *A16 = "ax";
+	static const char *A32 = "eax";
+	UNUSED(A32);
+	static const char *X = "bl";
+	static const char *X32 = "ebx";
+	static const char *X64 = "rbx";
+	static const char *Y = "dl";
+	static const char *Y32 = "edx";
+
+	Byte *ins_bytes = ins.bytes.items;
+	printf("lbl_0x%X: ;; %s\n", a, OPS[ins.op].name);
+
+	Op op = OPS[ins.op];
+	char *memory = NULL;
+
+	switch (op.addr_mode) {
+		case MODE_NONE: {
+			asprintf(&memory, " ");
+		} break;
+		case MODE_ACC: {
+			asprintf(&memory, "%s", A);
+		} break;
+		case MODE_IMM: {
+			asprintf(&memory, "0x%02X", ins_bytes[1]);
+		} break;
+		case MODE_ZP: {
+			printf("    xor esi, esi\n");
+			printf("    add esi, 0x%X\n", ins_bytes[1]);
+			printf("    and esi, 0xFF\n");
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_ZP_X: {
+			printf("    movzx esi, %s\n", X);
+			printf("    add esi, 0x%X\n", ins_bytes[1]);
+			printf("    and esi, 0xFF\n");
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_ZP_Y: {
+			printf("    movzx esi, %s\n", Y);
+			printf("    add esi, 0x%X\n", ins_bytes[1]);
+			printf("    and esi, 0xFF\n");
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_ABS: {
+			Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+			asprintf(&memory, "byte [ram_start+0x%X]", addr);
+		} break;
+		case MODE_ABS_X: {
+			Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+			printf("    mov esi, 0x%X\n", addr);
+			printf("    movzx %s, %s\n", X32, X);
+			printf("    add esi, %s\n", X32);
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_ABS_Y: {
+			Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+			printf("    mov esi, 0x%X\n", addr);
+			printf("    movzx %s, %s\n", Y32, Y);
+			printf("    add esi, %s\n", Y32);
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_IND: {
+			Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+			asprintf(&memory, "byte [ram_start+0x%X]", addr);
+		} break;
+		case MODE_IND_X: {
+			printf("    push %s\n", A16);
+			// 1. Calculate the zero-page address with the X register.
+			// The result is an 8-bit address that wraps around.
+			printf("    movzx esi, %s\n", X);
+			printf("    add esi, 0x%02X\n", ins_bytes[1]);
+			printf("    and esi, 0xFF\n");
+
+			// 2. Load the low byte of the final address from the calculated zero-page address.
+			printf("    movzx esi, byte [ram_start + esi]\n");
+
+			// 3. Load the high byte from the next zero-page address.
+			printf("    movzx edi, %s\n", X);
+			printf("    add edi, 0x%02X\n", ins_bytes[1]);
+			printf("    inc edi\n");
+			printf("    and edi, 0xFF\n");
+			printf("    movzx eax, byte [ram_start + edi]\n");
+			printf("    shl eax, 8\n");
+
+			// 4. Combine the low and high bytes.
+			printf("    or esi, eax\n");
+			printf("    pop %s\n", A16);
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+		case MODE_IND_Y: {
+			// 1. Load the 16-bit base address from the zero page.
+			// The low byte is at address 'a', the high byte is at 'a+1'.
+			printf("    movzx esi, byte [ram_start+0x%02X]\n", ins_bytes[1]);
+			printf("    movzx edi, byte [ram_start+0x%02X + 1]\n", ins_bytes[1]);
+			printf("    shl edi, 8\n");
+			printf("    or esi, edi\n");
+
+			// 2. Add the Y register's value to the base address.
+			printf("    add esi, %s\n", Y32);
+			asprintf(&memory, "byte [ram_start+esi]");
+		} break;
+	}
+
+	// A -> al
+	// X -> bl
+	// Y -> dl
+	// C -> CF
+	// Z -> ZF
+	// V -> OF
+	// N -> SF
+	// D -> ??
+	// I -> ??
+
+	switch (op.meta_kind) {
+		case META_ADC: {
+			printf("    adc %s, %s\n", A, memory);
+		} break;
+		case META_AND: {
+			printf("    and %s, %s\n", A, memory);
+		} break;
+		case META_ASL: {
+			printf("    shl %s, 1\n", memory);
+		} break;
+		case META_BIT: {
+			printf("    push %s\n", A16);
+			printf("    and %s, %s\n", A, memory);
+			printf("    pop %s\n", A16);
+		} break;
+		case META_CMP: {
+			printf("    cmp %s, %s\n", A, memory);
+		} break;
+		case META_CPX: {
+			printf("    cmp %s, %s\n", X, memory);
+		} break;
+		case META_CPY: {
+			printf("    cmp %s, %s\n", Y, memory);
+		} break;
+		case META_DEC: {
+			printf("    dec %s\n", memory);
+		} break;
+		case META_EOR: {
+			printf("    xor %s, %s\n", A, memory);
+		} break;
+		case META_INC: {
+			printf("    inc %s\n", memory);
+		} break;
+		case META_JMP: {
+			if (op.addr_mode == MODE_ABS) {
+				Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+				if (in_prg_range(p, addr) && is_code(p, addr)) {
+					printf("    jmp lbl_0x%X\n", addr);
+				}
+			} else if (op.addr_mode == MODE_IND) {
+				Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+				if (in_prg_range(p, addr) && is_code(p, addr)) {
+					printf("    jmp [ram_start+0x%X]\n", addr);
+				}
+			}
+		} break;
+		case META_LDA: {
+			printf("    mov %s, %s\n", A, memory);
+		} break;
+		case META_LDX: {
+			printf("    mov %s, %s\n", X, memory);
+		} break;
+		case META_LDY: {
+			printf("    mov %s, %s\n", Y, memory);
+		} break;
+		case META_LSR: {
+			printf("    shr %s, 1\n", memory);
+		} break;
+		case META_ORA: {
+			printf("    or %s, %s\n", X, memory);
+		} break;
+		case META_ROL: {
+			printf("    rcl %s, 1\n", memory);
+		} break;
+		case META_ROR: {
+			printf("    rcr %s, 1\n", memory);
+		} break;
+		case META_SBC: {
+			printf("    sbb %s, %s\n", A, memory);
+		} break;
+		case META_STA: {
+			printf("    mov %s, %s\n", memory, A);
+		} break;
+		case META_STX: {
+			printf("    mov %s, %s\n", memory, X);
+		} break;
+		case META_STY: {
+			printf("    mov %s, %s\n", memory, Y);
+		} break;
+		case META_BCC: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    jnc lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BCS: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    jc lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BEQ: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    je lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BMI: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    js lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BNE: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    jnz lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BPL: {
+			int8_t offset = (int8_t) ins_bytes[1];
+			Addr addr = a + 2 + offset;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    jns lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_BRK: {
+			printf("    mov edi, 0\n");
+			printf("    mov eax, 60\n"); // exit call
+			printf("    syscall\n");
+		} break;
+		case META_BVC: {
+			printf(";; TODO: define overflow flag\n");
+		} break;
+		case META_BVS: {
+			TODO("BVS");
+		} break;
+		case META_CLC: {
+			printf("    clc\n");
+		} break;
+		case META_CLD: {
+			printf(";; TODO\n");
+		} break;
+		case META_CLI: {
+			printf(";; TODO\n");
+		} break;
+		case META_CLV: {
+			printf(";; TODO\n");
+		} break;
+		case META_DEX: {
+			printf("    dec %s\n", X);
+		} break;
+		case META_DEY: {
+			printf("    dec %s\n", Y);
+		} break;
+		case META_INX: {
+			printf("    inc %s\n", X);
+		} break;
+		case META_INY: {
+			printf("    inc %s\n", Y);
+		} break;
+		case META_JSR: {
+			Addr addr = ins_bytes[1] | ins_bytes[2] << 8;
+			if (in_prg_range(p, addr) && is_code(p, addr)) {
+				printf("    call lbl_0x%X\n", addr);
+			}
+		} break;
+		case META_NOP: {
+		} break;
+		case META_PHA: {
+			printf("    push %s\n", A16);
+		} break;
+		case META_PHP: {
+			printf("    pushf\n");
+		} break;
+		case META_PLA: {
+			printf("    pop %s\n", A16);
+		} break;
+		case META_PLP: {
+			printf("    popf\n");
+		} break;
+		case META_RTI: {
+			printf("    iret\n");
+		} break;
+		case META_RTS: {
+			printf("    ret\n");
+		} break;
+		case META_SEC: {
+			printf("    stc\n");
+		} break;
+		case META_SED: {
+			printf(";; TODO\n");
+		} break;
+		case META_SEI: {
+			printf(";; TODO\n");
+		} break;
+		case META_TAX: {
+			printf("    mov %s, %s\n", X, A);
+		} break;
+		case META_TAY: {
+			printf("    mov %s, %s\n", Y, A);
+		} break;
+		case META_TSX: {
+			printf("    mov %s, rsp\n", X64);
+			printf("    sub %s, stack_bottom\n", X64);
+			printf("    and %s, 0xFF\n", X64);
+		} break;
+		case META_TXA: {
+			printf("    mov %s, %s\n", A, X);
+		} break;
+		case META_TXS: {
+			printf("    movzx rsp, %s\n", X);
+			printf("    add rsp, stack_bottom\n");
+		} break;
+		case META_TYA: {
+			printf("    mov %s, %s\n", A, Y);
+		} break;
+	}
+}
+
+void parsed_to_fasm(NesParser *p) {
+	size_t prg_len = p->rom.prg.count;
+
+	printf("format ELF64 executable\n");
+	printf("entry _setup\n\n");
+	printf(
+		"segment readable writeable\n"
+		"ram_start:\n"
+		"    rb 0x100\n"
+		"stack_bottom:\n"
+		"    rb 0x100\n"
+		"stack_top:\n"
+		"    rb 0x10000-0x200\n\n"
+		"segment readable executable\n\n"
+	);
+	printf(
+		"_setup:\n"
+		"    mov rsp, stack_top\n"
+	    "    jmp lbl_0x%X\n\n", p->entry_point
+	);
+	for (size_t i = 0; i < prg_len; i++) {
+		Addr a = i + 0x8000;
+		if (!is_code(p, a)) continue;
+		if (is_done(p, a)) continue;
+		set_done(p, a);
+
+		Instr ins = p->instrs.items[i];
+		printf("\n;; ===== Instruction set at 0x%04X =====\n\n", ins.loc);
+		instr_to_fasm(p, ins, a);
+		size_t offs = i+OPS[ins.op].size;
+		Instr next = p->instrs.items[offs];
+		while (is_parent(p, next, ins)) {
+			if (is_done(p, next.loc)) {
+				printf("    jmp lbl_0x%X\n", next.loc);
+				printf("    ;; 0x%04X: ... (attaches to already printed valid branch)\n", next.loc);
+				break;
+			}
+			set_done(p, next.loc);
+			instr_to_fasm(p, next, next.loc);
+			ins = next;
+			offs += OPS[ins.op].size;
+			next = p->instrs.items[offs];
+		}
+	}
+	return;
+}
+
 int main(void) {
 	// NesParser p = create_parser(ROMS_DIR"SMB.nes");
 	// while(parser_next_instr(&p)) {}
-	parse_file(ROMS_DIR"SMB.nes");
+	// NesParser p = parse_file(ROMS_DIR"SMB.nes");
+	NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/01-basics.nes");
+	parsed_to_fasm(&p);
 	return 0;
 } 

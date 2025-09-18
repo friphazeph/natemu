@@ -4,6 +4,19 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifndef _SE_PLATFORM_OPS
+#define _SE_PLATFORM_OPS
+
+typedef enum {
+	GR_OP_INVALID = 0,
+} GraphicsOpKind;
+
+typedef enum {
+	AUD_OP_INVALID = 0,
+} AudioOpKind;
+
+#endif // _SE_PLATFORM_OPS
+
 // ===== INES PARSING ===== //
 
 typedef uint8_t Byte;
@@ -240,218 +253,294 @@ typedef enum {
 	TXA       = 0x8A,
 	TXS       = 0x9A,
 	TYA       = 0x98,
-} Op;
+} OpKind;
+
+typedef enum {
+	MODE_NONE = 0,
+	MODE_ACC,
+	MODE_IMM,
+	MODE_ZP,
+	MODE_ZP_X,
+	MODE_ZP_Y,
+	MODE_ABS,
+	MODE_ABS_X,
+	MODE_ABS_Y,
+	MODE_IND,
+	MODE_IND_X,
+	MODE_IND_Y,
+} AddrMode;
+
+typedef enum {
+	META_ADC,
+	META_AND,
+	META_ASL,
+	META_BIT,
+	META_CMP,
+	META_CPX,
+	META_CPY,
+	META_DEC,
+	META_EOR,
+	META_INC,
+	META_JMP,
+	META_LDA,
+	META_LDX,
+	META_LDY,
+	META_LSR,
+	META_ORA,
+	META_ROL,
+	META_ROR,
+	META_SBC,
+	META_STA,
+	META_STX,
+	META_STY,
+	META_BCC,
+	META_BCS,
+	META_BEQ,
+	META_BMI,
+	META_BNE,
+	META_BPL,
+	META_BRK,
+	META_BVC,
+	META_BVS,
+	META_CLC,
+	META_CLD,
+	META_CLI,
+	META_CLV,
+	META_DEX,
+	META_DEY,
+	META_INX,
+	META_INY,
+	META_JSR,
+	META_NOP,
+	META_PHA,
+	META_PHP,
+	META_PLA,
+	META_PLP,
+	META_RTI,
+	META_RTS,
+	META_SEC,
+	META_SED,
+	META_SEI,
+	META_TAX,
+	META_TAY,
+	META_TSX,
+	META_TXA,
+	META_TXS,
+	META_TYA,
+} MetaOpKind;
 
 typedef struct {
 	const char *name;
 	size_t size;
-} OpDesc;
+	AddrMode addr_mode;
+	MetaOpKind meta_kind;
+} Op;
 
-static const OpDesc OP_DESCS[0x100] = {
+static const Op OPS[0x100] = {
 	// ADC
-	[ADC_IMM]   = {"ADC_IMM",   2},
-	[ADC_ZP]    = {"ADC_ZP",    2},
-	[ADC_ZP_X]  = {"ADC_ZP_X",  2},
-	[ADC_ABS]   = {"ADC_ABS",   3},
-	[ADC_ABS_X] = {"ADC_ABS_X", 3},
-	[ADC_ABS_Y] = {"ADC_ABS_Y", 3},
-	[ADC_IND_X] = {"ADC_IND_X", 2},
-	[ADC_IND_Y] = {"ADC_IND_Y", 2},
+	[ADC_IMM]   = {"ADC_IMM",   2, MODE_IMM, META_ADC},
+	[ADC_ZP]    = {"ADC_ZP",    2, MODE_ZP, META_ADC},
+	[ADC_ZP_X]  = {"ADC_ZP_X",  2, MODE_ZP_X, META_ADC},
+	[ADC_ABS]   = {"ADC_ABS",   3, MODE_ABS, META_ADC},
+	[ADC_ABS_X] = {"ADC_ABS_X", 3, MODE_ABS_X, META_ADC},
+	[ADC_ABS_Y] = {"ADC_ABS_Y", 3, MODE_ABS_Y, META_ADC},
+	[ADC_IND_X] = {"ADC_IND_X", 2, MODE_IND_X, META_ADC},
+	[ADC_IND_Y] = {"ADC_IND_Y", 2, MODE_IND_Y, META_ADC},
 
 	// AND
-	[AND_IMM]   = {"AND_IMM",   2},
-	[AND_ZP]    = {"AND_ZP",    2},
-	[AND_ZP_X]  = {"AND_ZP_X",  2},
-	[AND_ABS]   = {"AND_ABS",   3},
-	[AND_ABS_X] = {"AND_ABS_X", 3},
-	[AND_ABS_Y] = {"AND_ABS_Y", 3},
-	[AND_IND_X] = {"AND_IND_X", 2},
-	[AND_IND_Y] = {"AND_IND_Y", 2},
+	[AND_IMM]   = {"AND_IMM",   2, MODE_IMM, META_AND},
+	[AND_ZP]    = {"AND_ZP",    2, MODE_ZP, META_AND},
+	[AND_ZP_X]  = {"AND_ZP_X",  2, MODE_ZP_X, META_AND},
+	[AND_ABS]   = {"AND_ABS",   3, MODE_ABS, META_AND},
+	[AND_ABS_X] = {"AND_ABS_X", 3, MODE_ABS_X, META_AND},
+	[AND_ABS_Y] = {"AND_ABS_Y", 3, MODE_ABS_Y, META_AND},
+	[AND_IND_X] = {"AND_IND_X", 2, MODE_IND_X, META_AND},
+	[AND_IND_Y] = {"AND_IND_Y", 2, MODE_IND_Y, META_AND},
 
 	// ASL
-	[ASL_ACC]   = {"ASL_ACC",   1},
-	[ASL_ZP]    = {"ASL_ZP",    2},
-	[ASL_ZP_X]  = {"ASL_ZP_X",  2},
-	[ASL_ABS]   = {"ASL_ABS",   3},
-	[ASL_ABS_X] = {"ASL_ABS_X", 3},
+	[ASL_ACC]   = {"ASL_ACC",   1, MODE_ACC, META_ASL},
+	[ASL_ZP]    = {"ASL_ZP",    2, MODE_ZP, META_ASL},
+	[ASL_ZP_X]  = {"ASL_ZP_X",  2, MODE_ZP_X, META_ASL},
+	[ASL_ABS]   = {"ASL_ABS",   3, MODE_ABS, META_ASL},
+	[ASL_ABS_X] = {"ASL_ABS_X", 3, MODE_ABS_X, META_ASL},
 
-	[BCC]       = {"BCC",       2},
-	[BCS]       = {"BCS",       2},
-	[BEQ]       = {"BEQ",       2},
+	[BCC]       = {"BCC",       2, MODE_NONE, META_BCC},
+	[BCS]       = {"BCS",       2, MODE_NONE, META_BCS},
+	[BEQ]       = {"BEQ",       2, MODE_NONE, META_BEQ},
 
 	// BIT
-	[BIT_ZP]    = {"BIT_ZP",    2},
-	[BIT_ABS]   = {"BIT_ABS",   3},
+	[BIT_ZP]    = {"BIT_ZP",    2, MODE_ZP, META_BIT},
+	[BIT_ABS]   = {"BIT_ABS",   3, MODE_ABS, META_BIT},
 
-	[BMI]       = {"BMI",       2},
-	[BNE]       = {"BNE",       2},
-	[BPL]       = {"BPL",       2},
-	[BRK]       = {"BRK",       2},
-	[BVC]       = {"BVC",       2},
-	[BVS]       = {"BVS",       2},
-	[CLC]       = {"CLC",       1},
-	[CLD]       = {"CLD",       1},
-	[CLI]       = {"CLI",       1},
-	[CLV]       = {"CLV",       1},
+	[BMI]       = {"BMI",       2, MODE_NONE, META_BMI},
+	[BNE]       = {"BNE",       2, MODE_NONE, META_BNE},
+	[BPL]       = {"BPL",       2, MODE_NONE, META_BPL},
+	[BRK]       = {"BRK",       2, MODE_NONE, META_BRK},
+	[BVC]       = {"BVC",       2, MODE_NONE, META_BVC},
+	[BVS]       = {"BVS",       2, MODE_NONE, META_BVS},
+	[CLC]       = {"CLC",       1, MODE_NONE, META_CLC},
+	[CLD]       = {"CLD",       1, MODE_NONE, META_CLD},
+	[CLI]       = {"CLI",       1, MODE_NONE, META_CLI},
+	[CLV]       = {"CLV",       1, MODE_NONE, META_CLV},
 
 	// CMP
-	[CMP_IMM]   = {"CMP_IMM",   2},
-	[CMP_ZP]    = {"CMP_ZP",    2},
-	[CMP_ZP_X]  = {"CMP_ZP_X",  2},
-	[CMP_ABS]   = {"CMP_ABS",   3},
-	[CMP_ABS_X] = {"CMP_ABS_X", 3},
-	[CMP_ABS_Y] = {"CMP_ABS_Y", 3},
-	[CMP_IND_X] = {"CMP_IND_X", 2},
-	[CMP_IND_Y] = {"CMP_IND_Y", 2},
+	[CMP_IMM]   = {"CMP_IMM",   2, MODE_IMM, META_CMP},
+	[CMP_ZP]    = {"CMP_ZP",    2, MODE_ZP, META_CMP},
+	[CMP_ZP_X]  = {"CMP_ZP_X",  2, MODE_ZP_X, META_CMP},
+	[CMP_ABS_X] = {"CMP_ABS_X", 3, MODE_ABS_X, META_CMP},
+	[CMP_ABS]   = {"CMP_ABS",   3, MODE_ABS, META_CMP},
+	[CMP_ABS_Y] = {"CMP_ABS_Y", 3, MODE_ABS_Y, META_CMP},
+	[CMP_IND_X] = {"CMP_IND_X", 2, MODE_IND_X, META_CMP},
+	[CMP_IND_Y] = {"CMP_IND_Y", 2, MODE_IND_Y, META_CMP},
 
 	// CPX
-	[CPX_IMM]   = {"CPX_IMM",   2},
-	[CPX_ZP]    = {"CPX_ZP",    2},
-	[CPX_ABS]   = {"CPX_ABS",   3},
+	[CPX_IMM]   = {"CPX_IMM",   2, MODE_IMM, META_CPX},
+	[CPX_ZP]    = {"CPX_ZP",    2, MODE_ZP, META_CPX},
+	[CPX_ABS]   = {"CPX_ABS",   3, MODE_ABS, META_CPX},
 
 	// CPY
-	[CPY_IMM]   = {"CPY_IMM",   2},
-	[CPY_ZP]    = {"CPY_ZP",    2},
-	[CPY_ABS]   = {"CPY_ABS",   3},
+	[CPY_IMM]   = {"CPY_IMM",   2, MODE_IMM, META_CPY},
+	[CPY_ZP]    = {"CPY_ZP",    2, MODE_ZP, META_CPY},
+	[CPY_ABS]   = {"CPY_ABS",   3, MODE_ABS, META_CPY},
 
 	// DEC
-	[DEC_ZP]    = {"DEC_ZP",    2},
-	[DEC_ZP_X]  = {"DEC_ZP_X",  2},
-	[DEC_ABS]   = {"DEC_ABS",   3},
-	[DEC_ABS_X] = {"DEC_ABS_X", 3},
+	[DEC_ZP]    = {"DEC_ZP",    2, MODE_ZP, META_DEC},
+	[DEC_ZP_X]  = {"DEC_ZP_X",  2, MODE_ZP_X, META_DEC},
+	[DEC_ABS]   = {"DEC_ABS",   3, MODE_ABS, META_DEC},
+	[DEC_ABS_X] = {"DEC_ABS_X", 3, MODE_ABS_X, META_DEC},
 
-	[DEX]       = {"DEX",       1},
-	[DEY]       = {"DEY",       1},
+	[DEX]       = {"DEX",       1, MODE_NONE, META_DEX},
+	[DEY]       = {"DEY",       1, MODE_NONE, META_DEY},
 
 	// EOR
-	[EOR_IMM]   = {"EOR_IMM",   2},
-	[EOR_ZP]    = {"EOR_ZP",    2},
-	[EOR_ZP_X]  = {"EOR_ZP_X",  2},
-	[EOR_ABS]   = {"EOR_ABS",   3},
-	[EOR_ABS_X] = {"EOR_ABS_X", 3},
-	[EOR_ABS_Y] = {"EOR_ABS_Y", 3},
-	[EOR_IND_X] = {"EOR_IND_X", 2},
-	[EOR_IND_Y] = {"EOR_IND_Y", 2},
+	[EOR_IMM]   = {"EOR_IMM",   2, MODE_IMM, META_EOR},
+	[EOR_ZP]    = {"EOR_ZP",    2, MODE_ZP, META_EOR},
+	[EOR_ZP_X]  = {"EOR_ZP_X",  2, MODE_ZP_X, META_EOR},
+	[EOR_ABS]   = {"EOR_ABS",   3, MODE_ABS, META_EOR},
+	[EOR_ABS_X] = {"EOR_ABS_X", 3, MODE_ABS_X, META_EOR},
+	[EOR_ABS_Y] = {"EOR_ABS_Y", 3, MODE_ABS_Y, META_EOR},
+	[EOR_IND_X] = {"EOR_IND_X", 2, MODE_IND_X, META_EOR},
+	[EOR_IND_Y] = {"EOR_IND_Y", 2, MODE_IND_Y, META_EOR},
 
 	// INC
-	[INC_ZP]    = {"INC_ZP",    2},
-	[INC_ZP_X]  = {"INC_ZP_X",  2},
-	[INC_ABS]   = {"INC_ABS",   3},
-	[INC_ABS_X] = {"INC_ABS_X", 3},
+	[INC_ZP]    = {"INC_ZP",    2, MODE_ZP, META_INC},
+	[INC_ZP_X]  = {"INC_ZP_X",  2, MODE_ZP_X, META_INC},
+	[INC_ABS]   = {"INC_ABS",   3, MODE_ABS, META_INC},
+	[INC_ABS_X] = {"INC_ABS_X", 3, MODE_ABS_X, META_INC},
 
-	[INX]       = {"INX",       1},
-	[INY]       = {"INY",       1},
+	[INX]       = {"INX",       1, MODE_NONE, META_INX},
+	[INY]       = {"INY",       1, MODE_NONE, META_INY},
 
 	// JMP
-	[JMP_ABS]   = {"JMP_ABS",   3},
-	[JMP_IND]   = {"JMP_IND",   3},
+	[JMP_ABS]   = {"JMP_ABS",   3, MODE_ABS, META_JMP},
+	[JMP_IND]   = {"JMP_IND",   3, MODE_IND, META_JMP},
 
-	[JSR]       = {"JSR",       3},
+	[JSR]       = {"JSR",       3, MODE_NONE, META_JSR},
 
 	// LDA
-	[LDA_IMM]   = {"LDA_IMM",   2},
-	[LDA_ZP]    = {"LDA_ZP",    2},
-	[LDA_ZP_X]  = {"LDA_ZP_X",  2},
-	[LDA_ABS]   = {"LDA_ABS",   3},
-	[LDA_ABS_X] = {"LDA_ABS_X", 3},
-	[LDA_ABS_Y] = {"LDA_ABS_Y", 3},
-	[LDA_IND_X] = {"LDA_IND_X", 2},
-	[LDA_IND_Y] = {"LDA_IND_Y", 2},
+	[LDA_IMM]   = {"LDA_IMM",   2, MODE_IMM, META_LDA},
+	[LDA_ZP]    = {"LDA_ZP",    2, MODE_ZP, META_LDA},
+	[LDA_ZP_X]  = {"LDA_ZP_X",  2, MODE_ZP_X, META_LDA},
+	[LDA_ABS]   = {"LDA_ABS",   3, MODE_ABS, META_LDA},
+	[LDA_ABS_X] = {"LDA_ABS_X", 3, MODE_ABS_X, META_LDA},
+	[LDA_ABS_Y] = {"LDA_ABS_Y", 3, MODE_ABS_Y, META_LDA},
+	[LDA_IND_X] = {"LDA_IND_X", 2, MODE_IND_X, META_LDA},
+	[LDA_IND_Y] = {"LDA_IND_Y", 2, MODE_IND_Y, META_LDA},
 
 	// LDX
-	[LDX_IMM]   = {"LDX_IMM",   2},
-	[LDX_ZP]    = {"LDX_ZP",    2},
-	[LDX_ZP_Y]  = {"LDX_ZP_Y",  2},
-	[LDX_ABS]   = {"LDX_ABS",   3},
-	[LDX_ABS_Y] = {"LDX_ABS_Y", 3},
+	[LDX_IMM]   = {"LDX_IMM",   2, MODE_IMM, META_LDX},
+	[LDX_ZP]    = {"LDX_ZP",    2, MODE_ZP, META_LDX},
+	[LDX_ZP_Y]  = {"LDX_ZP_Y",  2, MODE_ZP_Y, META_LDX},
+	[LDX_ABS]   = {"LDX_ABS",   3, MODE_ABS, META_LDX},
+	[LDX_ABS_Y] = {"LDX_ABS_Y", 3, MODE_ABS_Y, META_LDX},
 
 	// LDY
-	[LDY_IMM]   = {"LDY_IMM",   2},
-	[LDY_ZP]    = {"LDY_ZP",    2},
-	[LDY_ZP_X]  = {"LDY_ZP_X",  2},
-	[LDY_ABS]   = {"LDY_ABS",   3},
-	[LDY_ABS_X] = {"LDY_ABS_X", 3},
+	[LDY_IMM]   = {"LDY_IMM",   2, MODE_IMM, META_LDY},
+	[LDY_ZP]    = {"LDY_ZP",    2, MODE_ZP, META_LDY},
+	[LDY_ZP_X]  = {"LDY_ZP_X",  2, MODE_ZP_X, META_LDY},
+	[LDY_ABS]   = {"LDY_ABS",   3, MODE_ABS, META_LDY},
+	[LDY_ABS_X] = {"LDY_ABS_X", 3, MODE_ABS_X, META_LDY},
 
 	// LSR
-	[LSR_ACC]   = {"LSR_ACC",   1},
-	[LSR_ZP]    = {"LSR_ZP",    2},
-	[LSR_ZP_X]  = {"LSR_ZP_X",  2},
-	[LSR_ABS]   = {"LSR_ABS",   3},
-	[LSR_ABS_X] = {"LSR_ABS_X", 3},
+	[LSR_ACC]   = {"LSR_ACC",   1, MODE_ACC, META_LSR},
+	[LSR_ZP]    = {"LSR_ZP",    2, MODE_ZP, META_LSR},
+	[LSR_ZP_X]  = {"LSR_ZP_X",  2, MODE_ZP_X, META_LSR},
+	[LSR_ABS]   = {"LSR_ABS",   3, MODE_ABS, META_LSR},
+	[LSR_ABS_X] = {"LSR_ABS_X", 3, MODE_ABS_X, META_LSR},
 
-	[NOP]       = {"NOP",       1},
+	[NOP]       = {"NOP",       1, MODE_NONE, META_NOP},
 
 	// ORA
-	[ORA_IMM]   = {"ORA_IMM",   2},
-	[ORA_ZP]    = {"ORA_ZP",    2},
-	[ORA_ZP_X]  = {"ORA_ZP_X",  2},
-	[ORA_ABS]   = {"ORA_ABS",   3},
-	[ORA_ABS_X] = {"ORA_ABS_X", 3},
-	[ORA_ABS_Y] = {"ORA_ABS_Y", 3},
-	[ORA_IND_X] = {"ORA_IND_X", 2},
-	[ORA_IND_Y] = {"ORA_IND_Y", 2},
+	[ORA_IMM]   = {"ORA_IMM",   2, MODE_IMM, META_ORA},
+	[ORA_ZP]    = {"ORA_ZP",    2, MODE_ZP, META_ORA},
+	[ORA_ZP_X]  = {"ORA_ZP_X",  2, MODE_ZP_X, META_ORA},
+	[ORA_ABS]   = {"ORA_ABS",   3, MODE_ABS, META_ORA},
+	[ORA_ABS_X] = {"ORA_ABS_X", 3, MODE_ABS_X, META_ORA},
+	[ORA_ABS_Y] = {"ORA_ABS_Y", 3, MODE_ABS_Y, META_ORA},
+	[ORA_IND_X] = {"ORA_IND_X", 2, MODE_IND_X, META_ORA},
+	[ORA_IND_Y] = {"ORA_IND_Y", 2, MODE_IND_Y, META_ORA},
 
-	[PHA]       = {"PHA",       1},
-	[PHP]       = {"PHP",       1},
-	[PLA]       = {"PLA",       1},
-	[PLP]       = {"PLP",       1},
+	[PHA]       = {"PHA",       1, MODE_NONE, META_PHA},
+	[PHP]       = {"PHP",       1, MODE_NONE, META_PHP},
+	[PLA]       = {"PLA",       1, MODE_NONE, META_PLA},
+	[PLP]       = {"PLP",       1, MODE_NONE, META_PLP},
 
 	// ROL
-	[ROL_ACC]   = {"ROL_ACC",   1},
-	[ROL_ZP]    = {"ROL_ZP",    2},
-	[ROL_ZP_X]  = {"ROL_ZP_X",  2},
-	[ROL_ABS]   = {"ROL_ABS",   3},
-	[ROL_ABS_X] = {"ROL_ABS_X", 3},
+	[ROL_ACC]   = {"ROL_ACC",   1, MODE_ACC, META_ROL},
+	[ROL_ZP]    = {"ROL_ZP",    2, MODE_ZP, META_ROL},
+	[ROL_ZP_X]  = {"ROL_ZP_X",  2, MODE_ZP_X, META_ROL},
+	[ROL_ABS]   = {"ROL_ABS",   3, MODE_ABS, META_ROL},
+	[ROL_ABS_X] = {"ROL_ABS_X", 3, MODE_ABS_X, META_ROL},
 
 	// ROR
-	[ROR_ACC]   = {"ROR_ACC",   1},
-	[ROR_ZP]    = {"ROR_ZP",    2},
-	[ROR_ZP_X]  = {"ROR_ZP_X",  2},
-	[ROR_ABS]   = {"ROR_ABS",   3},
-	[ROR_ABS_X] = {"ROR_ABS_X", 3},
+	[ROR_ACC]   = {"ROR_ACC",   1, MODE_ACC, META_ROR},
+	[ROR_ZP]    = {"ROR_ZP",    2, MODE_ZP, META_ROR},
+	[ROR_ZP_X]  = {"ROR_ZP_X",  2, MODE_ZP_X, META_ROR},
+	[ROR_ABS]   = {"ROR_ABS",   3, MODE_ABS, META_ROR},
+	[ROR_ABS_X] = {"ROR_ABS_X", 3, MODE_ABS_X, META_ROR},
 
-	[RTI]       = {"RTI",       1},
-	[RTS]       = {"RTS",       1},
+	[RTI]       = {"RTI",       1, MODE_NONE, META_RTI},
+	[RTS]       = {"RTS",       1, MODE_NONE, META_RTS},
 
 	// SBC
-	[SBC_IMM]   = {"SBC_IMM",   2},
-	[SBC_ZP]    = {"SBC_ZP",    2},
-	[SBC_ZP_X]  = {"SBC_ZP_X",  2},
-	[SBC_ABS]   = {"SBC_ABS",   3},
-	[SBC_ABS_X] = {"SBC_ABS_X", 3},
-	[SBC_ABS_Y] = {"SBC_ABS_Y", 3},
-	[SBC_IND_X] = {"SBC_IND_X", 2},
-	[SBC_IND_Y] = {"SBC_IND_Y", 2},
+	[SBC_IMM]   = {"SBC_IMM",   2, MODE_IMM, META_SBC},
+	[SBC_ZP]    = {"SBC_ZP",    2, MODE_ZP, META_SBC},
+	[SBC_ZP_X]  = {"SBC_ZP_X",  2, MODE_ZP_X, META_SBC},
+	[SBC_ABS]   = {"SBC_ABS",   3, MODE_ABS, META_SBC},
+	[SBC_ABS_X] = {"SBC_ABS_X", 3, MODE_ABS_X, META_SBC},
+	[SBC_ABS_Y] = {"SBC_ABS_Y", 3, MODE_ABS_Y, META_SBC},
+	[SBC_IND_X] = {"SBC_IND_X", 2, MODE_IND_X, META_SBC},
+	[SBC_IND_Y] = {"SBC_IND_Y", 2, MODE_IND_Y, META_SBC},
 
-	[SEC]       = {"SEC",       1},
-	[SED]       = {"SED",       1},
-	[SEI]       = {"SEI",       1},
+	[SEC]       = {"SEC",       1, MODE_NONE, META_SEC},
+	[SED]       = {"SED",       1, MODE_NONE, META_SED},
+	[SEI]       = {"SEI",       1, MODE_NONE, META_SEI},
 
 	// STA
-	[STA_ZP]    = {"STA_ZP",    2},
-	[STA_ZP_X]  = {"STA_ZP_X",  2},
-	[STA_ABS]   = {"STA_ABS",   3},
-	[STA_ABS_X] = {"STA_ABS_X", 3},
-	[STA_ABS_Y] = {"STA_ABS_Y", 3},
-	[STA_IND_X] = {"STA_IND_X", 2},
-	[STA_IND_Y] = {"STA_IND_Y", 2},
+	[STA_ZP]    = {"STA_ZP",    2, MODE_ZP, META_STA},
+	[STA_ZP_X]  = {"STA_ZP_X",  2, MODE_ZP_X, META_STA},
+	[STA_ABS]   = {"STA_ABS",   3, MODE_ABS, META_STA},
+	[STA_ABS_X] = {"STA_ABS_X", 3, MODE_ABS_X, META_STA},
+	[STA_ABS_Y] = {"STA_ABS_Y", 3, MODE_ABS_Y, META_STA},
+	[STA_IND_X] = {"STA_IND_X", 2, MODE_IND_X, META_STA},
+	[STA_IND_Y] = {"STA_IND_Y", 2, MODE_IND_Y, META_STA},
 
 	// STX
-	[STX_ZP]    = {"STX_ZP",    2},
-	[STX_ZP_Y]  = {"STX_ZP_Y",  2},
-	[STX_ABS]   = {"STX_ABS",   3},
+	[STX_ZP]    = {"STX_ZP",    2, MODE_ZP, META_STX},
+	[STX_ZP_Y]  = {"STX_ZP_Y",  2, MODE_ZP_Y, META_STX},
+	[STX_ABS]   = {"STX_ABS",   3, MODE_ABS, META_STX},
 
 	// STY
-	[STY_ZP]    = {"STY_ZP",    2},
-	[STY_ZP_Y]  = {"STY_ZP_Y",  2},
-	[STY_ABS]   = {"STY_ABS",   3},
+	[STY_ZP]    = {"STY_ZP",    2, MODE_ZP, META_STY},
+	[STY_ZP_Y]  = {"STY_ZP_Y",  2, MODE_ZP_Y, META_STY},
+	[STY_ABS]   = {"STY_ABS",   3, MODE_ABS, META_STY},
 
-	[TAX]       = {"TAX",       1},
-	[TAY]       = {"TAY",       1},
-	[TSX]       = {"TSX",       1},
-	[TXA]       = {"TXA",       1},
-	[TXS]       = {"TXS",       1},
-	[TYA]       = {"TYA",       1},
+	[TAX]       = {"TAX",       1, MODE_NONE, META_TAX},
+	[TAY]       = {"TAY",       1, MODE_NONE, META_TAY},
+	[TSX]       = {"TSX",       1, MODE_NONE, META_TSX},
+	[TXA]       = {"TXA",       1, MODE_NONE, META_TXA},
+	[TXS]       = {"TXS",       1, MODE_NONE, META_TXS},
+	[TYA]       = {"TYA",       1, MODE_NONE, META_TYA},
 };
 
 #endif // NES_H_
