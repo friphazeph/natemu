@@ -26,6 +26,12 @@ int main(int argc, char **argv) {
 
 	if (run) {
 		cmd_append(&cmd, BUILD_DIR"nes");
+		if(!cmd_run(&cmd, .stdout_path="./out.asm")) return 1;
+		cmd_append(&cmd, "fasm", "./out.asm", BUILD_DIR"out.o", "-m" "100000");
+		if(!cmd_run(&cmd)) return 1;
+		cmd_append(&cmd, "cc", CFLAGS, "-no-pie");
+		cmd_append(&cmd, "-o", "out");
+		cmd_append(&cmd, "-m64", BUILD_DIR"out.o", "helper.c");
 		if(!cmd_run(&cmd)) return 1;
 	}
 
