@@ -543,4 +543,6 @@ static const Op OPS[0x100] = {
 	[TYA]       = {"TYA",       1, MODE_NONE, META_TYA},
 };
 
+typedef uint16_t Addr;
+
 #endif // NES_H_

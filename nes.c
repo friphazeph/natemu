@@ -62,7 +62,16 @@ NesRom load_rom(const char *path) {
 	return r;
 }
 
-typedef uint16_t Addr;
+void dump_prg(const NesRom *rom, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        perror("fopen");
+        return;
+    }
+    fwrite(rom->prg.items, 1, rom->prg.count, f);
+    fclose(f);
+}
+
 
 uint64_t rom_read_at(const NesRom *rom, Addr cpu_addr, size_t num_bytes) {
     if (cpu_addr < 0x8000) {
@@ -72,8 +81,9 @@ uint64_t rom_read_at(const NesRom *rom, Addr cpu_addr, size_t num_bytes) {
     }
 
 	cpu_addr -= 0x8000;
+	cpu_addr %= rom->prg.count; // do mirroring
 
-    if (cpu_addr + num_bytes > rom->prg.count) {
+    if ((size_t)cpu_addr + num_bytes > rom->prg.count) {
         fprintf(stderr, "Error: Read out of bounds (cpu_addr 0x%X + 0x%lX > 0x%lX)\n",
                 cpu_addr, num_bytes, rom->prg.count);
         exit(1);
@@ -459,8 +469,8 @@ NesParser parse_file(const char *path) {
 		}
 		set_code(&p, a);
 		Instr ins = {0};
-		for (size_t i = 0; i < op_desc.size; i++) {
-			da_append(&ins.bytes, rom_read_at(&p.rom, a+i, sizeof(Byte)));
+		for (size_t j = 0; j < op_desc.size; j++) {
+			da_append(&ins.bytes, rom_read_at(&p.rom, a+j, sizeof(Byte)));
 		}
 		ins.op = op;
 		ins.loc = a;
@@ -489,28 +499,20 @@ NesParser parse_file(const char *path) {
 	return p;
 }
 
-void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
-	static const char *A = "al";
-	static const char *A16 = "ax";
-	static const char *A32 = "eax";
-	UNUSED(A32);
-	static const char *X = "bl";
-	static const char *X32 = "ebx";
-	// static const char *X64 = "rbx";
-	static const char *Y = "dl";
-	static const char *Y32 = "edx";
-	static const char *flags = "r15b";
-	static const char *flags64 = "r15";
-	UNUSED(flags64);
-	// LAYOUT: NV11DIZC
+static const char *A = "al";
+static const char *A64 = "rax";
+static const char *X = "bl";
+static const char *X32 = "ebx";
+static const char *X64 = "rbx";
+static const char *Y = "dl";
+static const char *Y32 = "edx";
+static const char *Y64 = "rdx";
+static const char *flags = "r15b";
+// LAYOUT: NV11DIZC
 
-	Byte *ins_bytes = ins.bytes.items;
-	printf("lbl_0x%04X: ;; %s\n", a, OPS[ins.op].name);
-
-	Op op = OPS[ins.op];
+char *addr_mode_to_fasm(AddrMode m, Byte *ins_bytes) {
 	char *memory = NULL;
-
-	switch (op.addr_mode) {
+	switch (m) {
 		case MODE_NONE: {
 			asprintf(&memory, " ");
 		} break;
@@ -561,7 +563,6 @@ void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
 			asprintf(&memory, "byte [ram_start+0x%X]", addr);
 		} break;
 		case MODE_IND_X: {
-			printf("    push %s\n", A16);
 			// 1. Calculate the zero-page address with the X register.
 			// The result is an 8-bit address that wraps around.
 			printf("    movzx esi, %s\n", X);
@@ -576,12 +577,11 @@ void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
 			printf("    add edi, 0x%02X\n", ins_bytes[1]);
 			printf("    inc edi\n");
 			printf("    and edi, 0xFF\n");
-			printf("    movzx eax, byte [ram_start + edi]\n");
-			printf("    shl eax, 8\n");
+			printf("    movzx r14d, byte [ram_start + edi]\n");
+			printf("    shl r14d, 8\n");
 
 			// 4. Combine the low and high bytes.
-			printf("    or esi, eax\n");
-			printf("    pop %s\n", A16);
+			printf("    or esi, r14d\n");
 			printf("    and esi, 0xFFFF\n");
 			asprintf(&memory, "byte [ram_start+esi]");
 		} break;
@@ -589,7 +589,7 @@ void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
 			// 1. Load the 16-bit base address from the zero page.
 			// The low byte is at address 'a', the high byte is at 'a+1'.
 			printf("    movzx esi, byte [ram_start+0x%02X]\n", ins_bytes[1]);
-			printf("    movzx edi, byte [ram_start+0x%02X + 1]\n", ins_bytes[1]);
+			printf("    movzx edi, byte [ram_start+0x%02X]\n", (ins_bytes[1]+1) & 0xFF);
 			printf("    shl edi, 8\n");
 			printf("    or esi, edi\n");
 
@@ -600,7 +600,10 @@ void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
 			asprintf(&memory, "byte [ram_start+esi]");
 		} break;
 	}
+	return memory;
+}
 
+void meta_kind_to_fasm(NesParser *p, Op op, const char *memory, Byte *ins_bytes, Addr a) {
 	switch (op.meta_kind) {
 		case META_ADC: {
 			printf("    load_flags_C\n");
@@ -954,7 +957,30 @@ void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
 			printf("    update_flags_ZN\n");
 		} break;
 	}
+}
+
+void instr_to_fasm(NesParser *p, Instr ins, Addr a) {
+	Byte *ins_bytes = ins.bytes.items;
+	printf("lbl_0x%04X: ;; %s\n", a, OPS[ins.op].name);
+
+	Op op = OPS[ins.op];
+	char *memory = addr_mode_to_fasm(op.addr_mode, ins_bytes);
+	meta_kind_to_fasm(p, op, memory, ins_bytes, a);
 	free(memory);
+	printf(";; log_state\n");
+	printf("    push %s\n", A64);
+	printf("    push %s\n", X64);
+	printf("    push %s\n", Y64);
+	printf("    movzx rsi, al\n");
+	printf("    movzx rdx, bl\n");
+	printf("    movzx rcx, dl\n");
+	printf("    mov r8b, r15b\n");
+	printf("    mov r9b, [stack_pointer]\n");
+	printf("    mov di, 0x%04X\n", a);
+	printf("    call log_state\n");
+	printf("    pop %s\n", Y64);
+	printf("    pop %s\n", X64);
+	printf("    pop %s\n", A64);
 }
 
 void parsed_to_fasm(NesParser *p) {
@@ -963,6 +989,7 @@ void parsed_to_fasm(NesParser *p) {
 	printf("format ELF64\n\n");
 	printf("public nes_main\n");
 	printf("extrn invalid_pc\n\n");
+	printf("extrn log_state\n\n");
 	printf("include 'header.asm'\n\n");
 	printf(
 		"section '.data' writeable\n"
@@ -971,16 +998,19 @@ void parsed_to_fasm(NesParser *p) {
 		"stack_bottom:\n"
 		"    rb 0x100\n"
 		"stack_top:\n"
-		"    rb 0x10000-0x200\n\n"
+		"    rb 0x10000-0x200-0x8000\n"
+		"prg:\n"
+		"    file 'prg.bin'\n\n"
 		"stack_pointer:\n"
 		"    rb 0x1\n\n"
 		"section '.code' executable\n\n"
 	);
+	dump_prg(&p->rom, "prg.bin");
 	printf(
 		"nes_main:\n"
 		"    mov byte [stack_pointer], 0xFF\n"
 		"    mov r15b, 0x30\n"
-		"    jmp lbl_0x%04X\n\n", p->entry_point
+		"    jmp lbl_0x%04X\n\n", 0x8000 + p->entry_point % (unsigned int) p->rom.prg.count
 	);
 	for (size_t i = 0; i < prg_len; i++) {
 		Addr a = i + 0x8000;
@@ -1029,8 +1059,8 @@ void parsed_to_fasm(NesParser *p) {
 int main(void) {
 	// NesParser p = create_parser(ROMS_DIR"SMB.nes");
 	// while(parser_next_instr(&p)) {}
-	// NesParser p = parse_file(ROMS_DIR"SMB.nes");
-	NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/01-basics.nes");
+	NesParser p = parse_file(ROMS_DIR"nestest.nes");
+	// NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/01-basics.nes");
 	parsed_to_fasm(&p);
 	return 0;
 } 
