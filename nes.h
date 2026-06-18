@@ -4,47 +4,27 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#ifndef _SE_PLATFORM_OPS
-#define _SE_PLATFORM_OPS
-
-typedef enum {
-	GR_OP_INVALID = 0,
-} GraphicsOpKind;
-
-typedef enum {
-	AUD_OP_INVALID = 0,
-} AudioOpKind;
-
-#endif // _SE_PLATFORM_OPS
-
 // ===== INES PARSING ===== //
 
 typedef uint8_t Byte;
 
 typedef struct {
-	Byte *items;
-	size_t count;
-	size_t capacity;
-} Bytes;
-
-typedef struct {
 	Byte magic[4];
-	Byte prg_len;
-	Byte chr_len;
+	Byte prg_chunk_n;
+	Byte chr_chunk_n;
 	Byte flags6;
 	Byte flags7;
 	Byte flags8;
 	Byte flags9;
 	Byte flags10;
-	Byte _flags[5];
+	Byte flags11;
+	Byte flags12;
+	Byte flags13;
+	Byte flags14;
+	Byte flags15;
 } NesHdr;
 
-typedef struct {
-	NesHdr hdr;
-	Bytes prg;
-} NesRom;
-
-NesRom load_rom(const char *path);
+#define trainer(h) ((h)->flags6 >> 2 & 1)
 
 // ===== NES/6502 OPS ===== //
 
@@ -268,10 +248,26 @@ typedef enum {
 	MODE_IND,
 	MODE_IND_X,
 	MODE_IND_Y,
+	MODE_COUNT
 } AddrMode;
 
+static const char *MODE_STR[MODE_COUNT] = {
+	[MODE_NONE]  = "MODE_NONE",
+	[MODE_ACC]   = "MODE_ACC",
+	[MODE_IMM]   = "MODE_IMM",
+	[MODE_ZP]    = "MODE_ZP",
+	[MODE_ZP_X]  = "MODE_ZP_X",
+	[MODE_ZP_Y]  = "MODE_ZP_Y",
+	[MODE_ABS]   = "MODE_ABS",
+	[MODE_ABS_X] = "MODE_ABS_X",
+	[MODE_ABS_Y] = "MODE_ABS_Y",
+	[MODE_IND]   = "MODE_IND",
+	[MODE_IND_X] = "MODE_IND_X",
+	[MODE_IND_Y] = "MODE_IND_Y",
+}; 
+
 typedef enum {
-	META_ADC,
+	META_ADC = 0,
 	META_AND,
 	META_ASL,
 	META_BIT,
@@ -327,7 +323,67 @@ typedef enum {
 	META_TXA,
 	META_TXS,
 	META_TYA,
+	META_COUNT
 } MetaOpKind;
+
+static const char *META_STR[META_COUNT] = {
+	[META_ADC] = "ADC",
+	[META_AND] = "AND",
+	[META_ASL] = "ASL",
+	[META_BIT] = "BIT",
+	[META_CMP] = "CMP",
+	[META_CPX] = "CPX",
+	[META_CPY] = "CPY",
+	[META_DEC] = "DEC",
+	[META_EOR] = "EOR",
+	[META_INC] = "INC",
+	[META_JMP] = "JMP",
+	[META_LDA] = "LDA",
+	[META_LDX] = "LDX",
+	[META_LDY] = "LDY",
+	[META_LSR] = "LSR",
+	[META_ORA] = "ORA",
+	[META_ROL] = "ROL",
+	[META_ROR] = "ROR",
+	[META_SBC] = "SBC",
+	[META_STA] = "STA",
+	[META_STX] = "STX",
+	[META_STY] = "STY",
+	[META_BCC] = "BCC",
+	[META_BCS] = "BCS",
+	[META_BEQ] = "BEQ",
+	[META_BMI] = "BMI",
+	[META_BNE] = "BNE",
+	[META_BPL] = "BPL",
+	[META_BRK] = "BRK",
+	[META_BVC] = "BVC",
+	[META_BVS] = "BVS",
+	[META_CLC] = "CLC",
+	[META_CLD] = "CLD",
+	[META_CLI] = "CLI",
+	[META_CLV] = "CLV",
+	[META_DEX] = "DEX",
+	[META_DEY] = "DEY",
+	[META_INX] = "INX",
+	[META_INY] = "INY",
+	[META_JSR] = "JSR",
+	[META_NOP] = "NOP",
+	[META_PHA] = "PHA",
+	[META_PHP] = "PHP",
+	[META_PLA] = "PLA",
+	[META_PLP] = "PLP",
+	[META_RTI] = "RTI",
+	[META_RTS] = "RTS",
+	[META_SEC] = "SEC",
+	[META_SED] = "SED",
+	[META_SEI] = "SEI",
+	[META_TAX] = "TAX",
+	[META_TAY] = "TAY",
+	[META_TSX] = "TSX",
+	[META_TXA] = "TXA",
+	[META_TXS] = "TXS",
+	[META_TYA] = "TYA",
+}; 
 
 typedef struct {
 	const char *name;
@@ -435,7 +491,7 @@ static const Op OPS[0x100] = {
 	[JMP_ABS]   = {"JMP_ABS",   3, MODE_ABS, META_JMP},
 	[JMP_IND]   = {"JMP_IND",   3, MODE_IND, META_JMP},
 
-	[JSR]       = {"JSR",       3, MODE_NONE, META_JSR},
+	[JSR]       = {"JSR",       3, MODE_ABS, META_JSR},
 
 	// LDA
 	[LDA_IMM]   = {"LDA_IMM",   2, MODE_IMM, META_LDA},
