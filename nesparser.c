@@ -298,7 +298,7 @@ NesParser parse_file(const char *path) {
 
 void print_instr_c(Instr ins) {
 	Op op = OPS[ins.op];
-	printf("\tl_0x%04lX:\n", ins.offs);
+	printf("\tcase 0x%04lX:\n", ins.offs);
 	// puts("\t\tprintf(\"PC: %04X | A: %02X X: %02X Y: %02X SP: %02X\\n\", PC, A, X, Y, SP);");
 	const char *kind = META_STR[op.meta_kind];
 	const char *mode = MODE_STR[op.addr_mode];
@@ -322,7 +322,9 @@ void print_instr_c(Instr ins) {
 
 void parsed_to_c(NesParser *p) {
 	bool *done = calloc(p->len, sizeof(bool));
+	size_t *starts = calloc(p->len, sizeof(size_t));
 	printf(
+		"#define NESLIB_IMPLEMENTATION\n"
 		"#include \"neslib.h\"\n"
 		"uint8_t mapper = 0x%X;\n"
 		"size_t prg_rom_len = %zu;\n"
@@ -336,22 +338,6 @@ void parsed_to_c(NesParser *p) {
 		p->mapper,
 		p->len
 	);
-	printf(
-		"void run_frame(void) {\n"
-		"\tstatic void *dispatch_table[%zu] = {\n\t\t",
-		p->len
-	);
-	for (size_t i = 0; i < p->len; i++) {
-		if (!p->is_valid[i]) continue;
-		printf("[0x%04lX] = &&l_0x%04lX,", i, i);
-	}
-	puts("};");
-	printf(
-		"\tcycle_budget = 29781;\n"
-		"jump_to_PC:\n"
-		"\tif (cycle_budget < 0) return;\n"
-		"    goto *dispatch_table[addr_to_prg_rom(PC)];\n\n"
-	);
 	for (size_t i = 0; i < p->len; i++) {
 		if (!p->is_valid[i]) continue;
 		if (done[i]) continue;
@@ -359,31 +345,40 @@ void parsed_to_c(NesParser *p) {
 
 		Instr ins = p->instrs[i];
 		printf("\n// ===== Instruction set at 0x%04X =====\n\n", ins.addr);
+		printf("void f_0x%04lX(size_t offs) {\n", ins.offs);
+		printf("\tswitch (offs) {\n");
 		print_instr_c(ins);
+		starts[i] = i;
 		size_t offs = i+OPS[ins.op].size;
 		Instr next = p->instrs[offs];
 		while (p->is_valid[next.offs]) {
 			if (done[next.offs]) {
-				printf("\t\tPC = 0x%04X;\n", next.addr);
-				printf("\t\tgoto jump_to_PC;\n");
+				printf("\t\treturn;\n");
 				printf("// 0x%04X: ... (attaches to already printed valid branch)\n", next.addr);
 				break;
 			}
 			done[next.offs] = true;
 			print_instr_c(next);
+			// printf("\t\tPC = 0x%04X;\n", next.addr);
+			starts[next.offs] = i;
 			ins = next;
 			offs += OPS[ins.op].size;
 			next = p->instrs[offs];
 		}
+		puts("\t}\n}");
 	}
-
 	printf(
-		// "\tdefault:\n"
-		// "\t\tfprintf(stderr, \"FATAL: Tried to jump to a statically invalid address! (0x%%04X)\\n\", PC);\n"
-		// "\t}\n"
-		"}\n"
-		);
+		"\n\nvoid (*const global_dispatch[%zu])(size_t) = {\n\t",
+		p->len
+	);
+	for (size_t i = 0; i < p->len; i++) {
+		if (!p->is_valid[i]) continue;
+		printf("[0x%04lX] = f_0x%04lX,\n\t", i, starts[i]);
+	}
+	puts("\n};");
+
 	free(done);
+	free(starts);
 }
 
 int main(void) {

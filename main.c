@@ -1,6 +1,14 @@
 #include "neslib.h"
-#include "game.c"
 #include <raylib.h>
+
+void run_frame(void) {
+	cycle_budget = 29780;
+
+	while(cycle_budget > 0) {
+		size_t offs = addr_to_prg_rom(PC);
+		global_dispatch[offs](offs);
+	}
+}
 
 #define SCALE 3
 
@@ -20,6 +28,7 @@ int main(void) {
 	nes_init();
 
 	while (!WindowShouldClose()) {
+		trigger_nmi();
 		run_frame();
 		ppu_catch_up();
 

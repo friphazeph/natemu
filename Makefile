@@ -13,8 +13,11 @@ $(BUILD_DIR)/nesparser: nesparser.c cut.h nes.h | $(BUILD_DIR)
 game.c: $(BUILD_DIR)/nesparser
 	$(BUILD_DIR)/nesparser > $@
 
-$(BUILD_DIR)/out: main.c game.c neslib.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I. -Wno-unused -Wno-implicit-fallthrough -lraylib -o $@ $<
+game.o: game.c neslib.h
+	$(CC) $(CFLAGS) -Wno-unused -Wno-implicit-fallthrough -c -o $@ $<
+
+$(BUILD_DIR)/out: main.c game.o neslib.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -Wno-unused -Wno-implicit-fallthrough -lraylib -o $@ game.o $<
 
 .PHONY: run
 run: $(BUILD_DIR)/out
