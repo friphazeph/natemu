@@ -9,7 +9,6 @@
 
 #define NES_PRG_BASE      0x8000
 #define NES_PRG_END       0xFFFF
-#define VEC_RESET_LOC     0xFFFC
 #define INES_TRAINER_SZ   512
 #define INES_PRG_CHUNK_SZ (1 << 14)
 #define INES_CHR_CHUNK_SZ (1 << 13)
@@ -39,7 +38,7 @@ typedef struct {
 	bool *is_valid;      // |
 	size_t *child_count; // |
 	size_t len;
-	Addr reset;
+	uint8_t mapper;
 } NesParser;
 
 static inline Byte rom_peek8(const NesRom rom, size_t offset) {
@@ -114,6 +113,16 @@ void dump_prg(const NesRom *rom, const char *path) {
     fclose(f);
 }
 
+void dump_chr(const NesRom *rom, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        perror("fopen");
+        return;
+    }
+    fwrite(rom->chr, 1, rom->chr_len, f);
+    fclose(f);
+}
+
 static inline size_t addr_to_index(Addr rom_addr) {
 	return rom_addr - NES_PRG_BASE;
 }
@@ -133,8 +142,9 @@ NesParser create_parser(NesRom r) {
 	p.parents     = calloc(r.prg_len, sizeof(Addr *));
 	p.instrs      = calloc(r.prg_len, sizeof(Instr));
 	p.len = r.prg_len;
-	p.reset = cpu_read16(r, VEC_RESET_LOC);
-	dump_prg(&r, "test.rom");
+	p.mapper = (r.hdr->flags6 >> 4) | (r.hdr->flags7 & 0xF0);
+	dump_prg(&r, "prg_rom_embed.bin");
+	dump_chr(&r, "chr_rom_embed.bin");
 	return p;
 }
 
@@ -172,12 +182,6 @@ void set_parents(NesParser *p, Instr ins) {
 	switch (ins.op) {
 		case JSR: case JMP_ABS: {
 			Addr jump_addr = ins.bytes[1] | ins.bytes[2] << 8;
-			// if (ins.addr == 0x8067)  {
-			// 	fprintf(stderr, "[0] 0x%02X\n", ins.bytes[0]);
-			// 	fprintf(stderr, "[1] 0x%02X\n", ins.bytes[1]);
-			// 	fprintf(stderr, "[2] 0x%02X\n", ins.bytes[2]);
-			// 	fprintf(stderr, "JMP 0x%04X\n", jump_addr);
-			// }
 			if (in_prg_range(p, jump_addr)) {
 				arr_append(p->parents[addr_to_index(jump_addr)], ins.addr);
 				p->child_count[ins.offs] = 1;
@@ -294,114 +298,25 @@ NesParser parse_file(const char *path) {
 
 void print_instr_c(Instr ins) {
 	Op op = OPS[ins.op];
-	printf("case 0x%04X:\n", ins.addr); // goto label
-	switch (op.addr_mode) {
-		case MODE_NONE:  break;
-		case MODE_ACC:
-			printf("    mem = mem_mode_acc();\n");
-			break;
-		case MODE_IMM:   
-			printf("    *mem = 0x%02X;\n", ins.bytes[1]);
-			break;
-		case MODE_ZP:
-			printf("    mem = mem_mode_zp(0x%02X);\n", ins.bytes[1]);
-			break;
-		case MODE_ZP_X:
-			printf("    mem = mem_mode_zp_x(0x%02X);\n", ins.bytes[1]);
-			break;
-		case MODE_ZP_Y:
-			printf("    mem = mem_mode_zp_y(0x%02X);\n", ins.bytes[1]);
-			break;
-		case MODE_ABS:
-			printf("    mem = mem_mode_abs(0x%04X);\n", ins.bytes[1] | ins.bytes[2] << 8);
-			break;
-		case MODE_ABS_X:
-			printf("    mem = mem_mode_abs_x(0x%04X);\n", ins.bytes[1] | ins.bytes[2] << 8);
-			break;
-		case MODE_ABS_Y:
-			printf("    mem = mem_mode_abs_y(0x%04X);\n", ins.bytes[1] | ins.bytes[2] << 8);
-			break;
-		case MODE_IND:
-			printf("    mem = mem_mode_ind(0x%04X);\n", ins.bytes[1] | ins.bytes[2] << 8);
-			break;
-		case MODE_IND_X:
-			printf("    mem = mem_mode_ind_x(0x%02X);\n", ins.bytes[1]);
-			break;
-		case MODE_IND_Y:
-			printf("    mem = mem_mode_ind_y(0x%02X);\n", ins.bytes[1]);
-			break;
-		case MODE_COUNT:
-			fprintf(stderr, "Unreachable MODE_COUNT");
-			exit(1);
-			break;
+	printf("\tl_0x%04lX:\n", ins.offs);
+	// puts("\t\tprintf(\"PC: %04X | A: %02X X: %02X Y: %02X SP: %02X\\n\", PC, A, X, Y, SP);");
+	const char *kind = META_STR[op.meta_kind];
+	const char *mode = MODE_STR[op.addr_mode];
+	printf("\t\tTICK(%zu, %zu);\n", arr_len(ins.bytes), op.cycles);
+	if (op.addr_mode == MODE_ACC) { // because accumulator mode appears in meta_ops that accept operands
+		printf("\t\t%s(%s, 0x00);\n", kind, mode);
+		return;
 	}
-	printf("    ");
-	switch (op.meta_kind) {
-		// --- Arithmetic ---
-		case META_ADC: printf("adc(*mem);\n"); break;
-		case META_SBC: printf("sbc(*mem);\n"); break;
-		case META_DEC: printf("dec(mem);\n"); break;
-		case META_DEX: printf("dex();\n"); break;
-		case META_DEY: printf("dey();\n"); break;
-		case META_INC: printf("inc(mem);\n"); break;
-		case META_INX: printf("inx();\n"); break;
-		case META_INY: printf("iny();\n"); break;
-		// --- Register stuff ---
-		case META_LDA: printf("lda(*mem);\n"); break;
-		case META_LDX: printf("ldx(*mem);\n"); break;
-		case META_LDY: printf("ldy(*mem);\n"); break;
-		case META_STA: printf("sta(mem);\n"); break;
-		case META_STX: printf("stx(mem);\n"); break;
-		case META_STY: printf("sty(mem);\n"); break;
-		case META_TAX: printf("tax();\n"); break;
-		case META_TAY: printf("tay();\n"); break;
-		case META_TXA: printf("txa();\n"); break;
-		case META_TYA: printf("tya();\n"); break;
-		case META_TSX: printf("tsx();\n"); break;
-		case META_TXS: printf("txs();\n"); break;
-		case META_PHP: printf("php();\n"); break;
-		case META_PLP: printf("plp();\n"); break;
-		case META_PHA: printf("pha();\n"); break;
-		case META_PLA: printf("pla();\n"); break;
-		// --- Bitwise ---
-		case META_AND: printf("and(*mem);\n"); break;
-		case META_EOR: printf("eor(*mem);\n"); break;
-		case META_ORA: printf("ora(*mem);\n"); break;
-		case META_ASL: printf("asl(mem);\n"); break;
-		case META_LSR: printf("lsr(mem);\n"); break;
-		case META_ROL: printf("rol(mem);\n"); break;
-		case META_ROR: printf("ror(mem);\n"); break;
-		// --- Flag Setting ---
-		case META_BIT: printf("bit(*mem);\n"); break;
-		case META_CLC: printf("clc();\n"); break;
-		case META_CLD: printf("cld();\n"); break;
-		case META_CLI: printf("cli();\n"); break;
-		case META_CLV: printf("clv();\n"); break;
-		case META_SEC: printf("sec();\n"); break;
-		case META_SED: printf("sed();\n"); break;
-		case META_SEI: printf("sei();\n"); break;
-		case META_CMP: printf("cmp(*mem);\n"); break;
-		case META_CPX: printf("cpx(*mem);\n"); break;
-		case META_CPY: printf("cpy(*mem);\n"); break;
-		// --- Control flow ---
-		case META_BCC: printf("bcc(*mem);\n"); goto jump_to_PC;
-		case META_BCS: printf("bcs(*mem);\n"); goto jump_to_PC;
-		case META_BNE: printf("bne(*mem);\n"); goto jump_to_PC;
-		case META_BEQ: printf("beq(*mem);\n"); goto jump_to_PC;
-		case META_BPL: printf("bpl(*mem);\n"); goto jump_to_PC;
-		case META_BMI: printf("bmi(*mem);\n"); goto jump_to_PC;
-		case META_BVC: printf("bvc(*mem);\n"); goto jump_to_PC;
-		case META_BVS: printf("bvs(*mem);\n"); goto jump_to_PC;
-		case META_BRK: printf("brk();\n");     goto jump_to_PC;
-		case META_JMP: printf("jmp(*mem);\n"); goto jump_to_PC;
-		case META_JSR: printf("jsr(*mem);\n"); goto jump_to_PC;
-		case META_RTI: printf("rti();\n");     goto jump_to_PC;
-		case META_RTS: printf("rts();\n");     goto jump_to_PC;
-		jump_to_PC:
-			printf("    goto jump_to_PC;\n");
+	switch (arr_len(ins.bytes)) {
+		case 1:
+			printf("\t\t%s(%s);\n", kind, mode);
 			break;
-		// --- Other ---
-		case META_NOP: printf("nop();\n"); break;
+		case 2:
+			printf("\t\t%s(%s, 0x%02X);\n", kind, mode, ins.bytes[1]);
+			break;
+		case 3:
+			printf("\t\t%s(%s, 0x%04X);\n", kind, mode, ins.bytes[1] | ins.bytes[2] << 8);
+			break;
 	}
 }
 
@@ -409,12 +324,33 @@ void parsed_to_c(NesParser *p) {
 	bool *done = calloc(p->len, sizeof(bool));
 	printf(
 		"#include \"neslib.h\"\n"
-		"\n"
-		"int main(void) {\n"
-		"    PC = 0x%04X;\n"
+		"uint8_t mapper = 0x%X;\n"
+		"size_t prg_rom_len = %zu;\n"
+		"const Byte prg_rom[] = {\n"
+		"\t#embed \"prg_rom_embed.bin\"\n"
+		"};\n"
+		"const Byte chr_rom[] = {\n"
+		"\t#embed \"chr_rom_embed.bin\"\n"
+		"};\n"
+		"\n",
+		p->mapper,
+		p->len
+	);
+	printf(
+		"void run_frame(void) {\n"
+		"\tstatic void *dispatch_table[%zu] = {\n\t\t",
+		p->len
+	);
+	for (size_t i = 0; i < p->len; i++) {
+		if (!p->is_valid[i]) continue;
+		printf("[0x%04lX] = &&l_0x%04lX,", i, i);
+	}
+	puts("};");
+	printf(
+		"\tcycle_budget = 29781;\n"
 		"jump_to_PC:\n"
-		"    switch(PC) {\n",
-		p->reset
+		"\tif (cycle_budget < 0) return;\n"
+		"    goto *dispatch_table[addr_to_prg_rom(PC)];\n\n"
 	);
 	for (size_t i = 0; i < p->len; i++) {
 		if (!p->is_valid[i]) continue;
@@ -428,6 +364,8 @@ void parsed_to_c(NesParser *p) {
 		Instr next = p->instrs[offs];
 		while (p->is_valid[next.offs]) {
 			if (done[next.offs]) {
+				printf("\t\tPC = 0x%04X;\n", next.addr);
+				printf("\t\tgoto jump_to_PC;\n");
 				printf("// 0x%04X: ... (attaches to already printed valid branch)\n", next.addr);
 				break;
 			}
@@ -440,9 +378,9 @@ void parsed_to_c(NesParser *p) {
 	}
 
 	printf(
-		"default:\n"
-		"    fprintf(stderr, \"FATAL: Tried to jump to a statically invalid address!\\n\");\n"
-		"    }\n"
+		// "\tdefault:\n"
+		// "\t\tfprintf(stderr, \"FATAL: Tried to jump to a statically invalid address! (0x%%04X)\\n\", PC);\n"
+		// "\t}\n"
 		"}\n"
 		);
 	free(done);

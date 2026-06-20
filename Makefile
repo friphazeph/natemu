@@ -1,5 +1,5 @@
 CC := cc
-CFLAGS := -std=c23 -Wpedantic -Wall -Wextra -Werror -Wno-override-init -ggdb
+CFLAGS := -Wall -Wextra -Werror -Wno-override-init
 BUILD_DIR := ./build
 
 .DEFAULT_GOAL := $(BUILD_DIR)/nesparser
@@ -10,11 +10,11 @@ $(BUILD_DIR):
 $(BUILD_DIR)/nesparser: nesparser.c cut.h nes.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-generated_main.c: $(BUILD_DIR)/nesparser
+game.c: $(BUILD_DIR)/nesparser
 	$(BUILD_DIR)/nesparser > $@
 
-$(BUILD_DIR)/out: generated_main.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I. -Wno-implicit-fallthrough -o $@ $<
+$(BUILD_DIR)/out: main.c game.c neslib.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I. -Wno-unused -Wno-implicit-fallthrough -lraylib -o $@ $<
 
 .PHONY: run
 run: $(BUILD_DIR)/out
