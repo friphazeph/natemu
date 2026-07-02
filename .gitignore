@@ -1,5 +1,5 @@
 build/**
-roms/**
+# roms/**
 *.old
 *.out
 *.o
