@@ -302,14 +302,18 @@ void print_instr_c(Instr ins) {
 	// puts("\t\tprintf(\"PC: %04X | A: %02X X: %02X Y: %02X SP: %02X\\n\", PC, A, X, Y, SP);");
 	const char *kind = META_STR[op.meta_kind];
 	const char *mode = MODE_STR[op.addr_mode];
-	printf("\t\tTICK(%zu, %zu);\n", arr_len(ins.bytes), op.cycles);
-	if (op.addr_mode == MODE_ACC) { // because accumulator mode appears in meta_ops that accept operands
-		printf("\t\t%s(%s, 0x00);\n", kind, mode);
-		return;
-	}
-	switch (arr_len(ins.bytes)) {
+	printf("\t\tTICK(%zu, %zu);\n", op.size, base_cycles(op));
+	// if (op.addr_mode == MODE_ACC) { // because accumulator mode appears in meta_ops that accept operands
+	// 	printf("\t\t%s(%s, 0x00);\n", kind, mode);
+	// 	return;
+	// }
+	// if (op.mem_kind == MEM_KIND_NONE) {
+	// 	printf("\t\t%s(%s);\n", kind, mode);
+	// 	return;
+	// }
+	switch (op.size) {
 		case 1:
-			printf("\t\t%s(%s);\n", kind, mode);
+			printf("\t\t%s(%s, 0x00);\n", kind, mode);
 			break;
 		case 2:
 			printf("\t\t%s(%s, 0x%02X);\n", kind, mode, ins.bytes[1]);
@@ -327,13 +331,14 @@ void parsed_to_c(NesParser *p) {
 		"#define NESLIB_IMPLEMENTATION\n"
 		"#include \"neslib.h\"\n"
 		"uint8_t mapper = 0x%X;\n"
-		"size_t prg_rom_len = %zu;\n"
+		"const size_t prg_rom_len = %zu;\n"
 		"const Byte prg_rom[] = {\n"
 		"\t#embed \"prg_rom_embed.bin\"\n"
 		"};\n"
 		"const Byte chr_rom[] = {\n"
 		"\t#embed \"chr_rom_embed.bin\"\n"
 		"};\n"
+		"const size_t chr_rom_len = sizeof(chr_rom);\n"
 		"\n",
 		p->mapper,
 		p->len
@@ -384,7 +389,7 @@ void parsed_to_c(NesParser *p) {
 int main(void) {
 	// NesParser p = parse_file(ROMS_DIR"nestest.nes");
 	NesParser p = parse_file(ROMS_DIR"SMB.nes");
-	// NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/01-basics.nes");
+	// NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/16-special.nes");
 	parsed_to_c(&p);
 	return 0;
 } 
