@@ -38,7 +38,7 @@ void run_for(size_t budget) {
 	}
 }
 
-#define SCALE 3
+#define SCALE 6
 
 int main(void) {
 	InitWindow(PIXELS_W * SCALE, PIXELS_H * SCALE, "SMB recomp");

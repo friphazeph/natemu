@@ -97,10 +97,11 @@ struct {
 	uint64_t last_update;
 	uint16_t line; // 0-261
 	uint16_t dot;  // 0-340
-	uint16_t nt_offs;
+	uint16_t base_nt;
 	uint16_t x_scroll;
 	uint16_t y_scroll;
 	uint16_t v;
+	uint16_t t;
 	uint16_t bg_table_addr; // 0 or 0x1000
 	uint16_t sprite_table_addr; // 0 or 0x1000
 	uint8_t sprite_height; // 8 or 16
@@ -158,8 +159,6 @@ Byte ppu_read_reg(Addr addr) {
 				| (PPU.sprite_overflow << 5);
 			PPU.vblank = false;
 			PPU.w = false;
-			PPU.x_scroll = 0;
-			PPU.y_scroll = 0;
 			// if (PPU.vblank)
 			// 	printf("vblank !\n");
 			return ret;
@@ -179,6 +178,7 @@ static inline void ppu_write_reg(Addr addr, Byte value) {
 	switch (addr & 0x7) {
 		case 0: // PPU CTRL
 			bool nmi_old = PPU.nmi_enable;
+			PPU.base_nt = value & 0x03;
 			PPU.increment = (value & 0x04) ? 32 : 1;
 			PPU.sprite_table_addr = (value & 0x08) ? 0x1000 : 0x0;
 			PPU.bg_table_addr = (value & 0x10) ? 0x1000 : 0x0;
@@ -212,12 +212,17 @@ static inline void ppu_write_reg(Addr addr, Byte value) {
 			}
 			break;
 		case 6: // TODO: transfer to PPU.t before on low byte write or something
-			if (PPU.w) {
-				PPU.v = (PPU.v & 0xFF00) | value;
-				PPU.w = false;
-			} else {
-				PPU.v = (PPU.v & 0x00FF) | ((value & 0x3F) << 8);
+			if (!PPU.w) {
+				// First write: high byte
+				PPU.t = (PPU.t & 0x00FF) | ((value & 0x3F) << 8);
 				PPU.w = true;
+			} else {
+				// Second write: low byte
+				PPU.t = (PPU.t & 0xFF00) | value;
+				PPU.v = PPU.t; // Current VRAM pointer updates to match temporary pointer
+				PPU.w = false;
+
+				PPU.base_nt = (PPU.v >> 10) & 3; 
 			}
 			break;
 		case 7: // PPU DATA
@@ -248,33 +253,34 @@ static inline void ppu_exec_cmd(PPU_cmd *c) {
 				if (PPU.bg_enable) {
 					int wx = (PPU.dot - 1) + PPU.x_scroll;
 					int wy = PPU.line + PPU.y_scroll;
-					int raw_tile_x = (wx >> 3);
-					int raw_tile_y = (wy >> 3);
 
-					// Tile coordinates inside the chosen nametable
-					int tile_x = raw_tile_x & 31;
-					int tile_y = raw_tile_y % 30;
+					// 1. Calculate global tile positions factoring in the starting nametable
+					int total_tile_x = (wx >> 3) + ((PPU.base_nt & 1) * 32);
+					int total_tile_y = (wy >> 3) + ((PPU.base_nt & 2) ? 30 : 0);
 
-					// Fine offsets within the tile
-					int fine_x = wx & 7;
-					int fine_y = wy & 7;
+					// 2. Wrap coordinates into local individual nametable indices
+					int tile_x = total_tile_x % 32;
+					int tile_y = total_tile_y % 30;
 
-					uint16_t nt_base = 0x2000 | (PPU.v & 0x0C00);
-					if (raw_tile_x & 0x20)
-						nt_base ^= 0x400;
+					// 3. Resolve the actual nametable base address
+					uint16_t nt_base = 0x2000;
+					if (total_tile_x & 32)       nt_base |= 0x400; // Toggle right nametable
+					if ((total_tile_y / 30) & 1) nt_base |= 0x800; // Toggle bottom nametable
 
-					// Tile address in VRAM
+					// 4. Fetch tile index from calculated VRAM position
 					uint16_t tile_addr = nt_base + (tile_y * 32) + tile_x;
 					uint8_t  tile      = ppu_read(tile_addr);
 
-					// Attribute table address
-					uint16_t attr_addr = (nt_base | 0x03C0)
-						+ ((tile_y >> 2) * 8)
-						+ (tile_x >> 2);
-					uint8_t attr      = ppu_read(attr_addr);
+					// 5. Fetch attribute byte and calculate correct palette quadrant
+					uint16_t attr_addr = (nt_base | 0x03C0) + ((tile_y >> 2) * 8) + (tile_x >> 2);
+					uint8_t  attr      = ppu_read(attr_addr);
 
 					int pal_shift     = ((tile_y & 2) << 1) | (tile_x & 2);
 					int pal_offset    = (attr >> pal_shift) & 0x03;
+
+					// 6. Fine pixel offsets within the chosen tile
+					int fine_x = wx & 7;
+					int fine_y = wy & 7;
 
 					uint16_t plane0_addr = PPU.bg_table_addr + (tile * 16) + fine_y;
 					uint8_t  low         = ppu_read(plane0_addr);
@@ -287,6 +293,47 @@ static inline void ppu_exec_cmd(PPU_cmd *c) {
 						uint16_t pal_addr = 0x3F00 + (pal_offset * 4) + bg_color_index;
 						bg_pixel = palette[ppu_read(pal_addr) & 0x3F];
 					}
+					// int wx = (PPU.dot - 1) + PPU.x_scroll;
+					// int wy = PPU.line + PPU.y_scroll;
+					// int raw_tile_x = (wx >> 3);
+					// int raw_tile_y = (wy >> 3);
+					//
+					// // Tile coordinates inside the chosen nametable
+					// int tile_x = raw_tile_x & 31;
+					// int tile_y = raw_tile_y % 30;
+					//
+					// // Fine offsets within the tile
+					// int fine_x = wx & 7;
+					// int fine_y = wy & 7;
+					//
+					// uint16_t nt_base = 0x2000 | (PPU.v & 0x0C00);
+					// if (raw_tile_x & 0x20)
+					// 	nt_base ^= 0x400;
+					//
+					// // Tile address in VRAM
+					// uint16_t tile_addr = nt_base + (tile_y * 32) + tile_x;
+					// uint8_t  tile      = ppu_read(tile_addr);
+					//
+					// // Attribute table address
+					// uint16_t attr_addr = (nt_base | 0x03C0)
+					// 	+ ((tile_y >> 2) * 8)
+					// 	+ (tile_x >> 2);
+					// uint8_t attr      = ppu_read(attr_addr);
+					//
+					// int pal_shift     = ((tile_y & 2) << 1) | (tile_x & 2);
+					// int pal_offset    = (attr >> pal_shift) & 0x03;
+					//
+					// uint16_t plane0_addr = PPU.bg_table_addr + (tile * 16) + fine_y;
+					// uint8_t  low         = ppu_read(plane0_addr);
+					// uint8_t  high        = ppu_read(plane0_addr + 8);
+					//
+					// int bit = 7 - fine_x;
+					// bg_color_index = ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
+					//
+					// if (bg_color_index) {
+					// 	uint16_t pal_addr = 0x3F00 + (pal_offset * 4) + bg_color_index;
+					// 	bg_pixel = palette[ppu_read(pal_addr) & 0x3F];
+					// }
 				}
 
 				// Sprites

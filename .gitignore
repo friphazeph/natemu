@@ -1,7 +1,8 @@
 build/**
-# roms/**
+roms/**
 *.old
 *.out
 *.o
+*.bin
 *.ASM
 game.c
