@@ -27,7 +27,10 @@
 		max_align_t _align_do_not_use; \
 		struct __VA_ARGS__;            \
 	}
-
+#define TODO(message) do {                                             \
+	fprintf(stderr, "%s:%d: TODO: %s\n", __FILE__, __LINE__, message); \
+	abort();                                                           \
+} while (0)
 
 /* ===== Memory ===== */
 
@@ -89,7 +92,6 @@ Allocator *cut__pool_new(size_t n, size_t block_sz, cut__pool_new_args args);
 #define pool_new(n, block_sz, ...) cut__pool_new(n, block_sz, (cut__pool_new_args) {.alloc = NULL, .extend = false, __VA_ARGS__})
 
 /* - Internal temp alloc - */
-_Thread_local static Allocator *cut__temp_arena = NULL;
 #define temp_ctx \
 	for (size_t cut__s = (cut__temp_arena ? arena_save(cut__temp_arena) : 0), cut__once_ = 0; \
 			!cut__once_; \
@@ -473,11 +475,18 @@ Allocator *cut__pool_new(size_t n, size_t block_sz, cut__pool_new_args args) {
 	return a;
 }
 
+/* - Internal temp alloc - */
+
+_Thread_local static Allocator *cut__temp_arena = NULL;
+
 /* - Files - */
 
 File mmap_file(const char *name) {
     int fd = open(name, O_RDONLY);
-    if (fd == -1) return (File){0};
+    if (fd == -1) {
+		perror("Problem opening file");
+		return (File){0};
+	}
 
     struct stat s;
     if (fstat(fd, &s) == -1) { close(fd); return (File){0}; }

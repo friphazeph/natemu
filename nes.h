@@ -4,28 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// ===== INES PARSING ===== //
-
-typedef uint8_t Byte;
-
-typedef struct {
-	Byte magic[4];
-	Byte prg_chunk_n;
-	Byte chr_chunk_n;
-	Byte flags6;
-	Byte flags7;
-	Byte flags8;
-	Byte flags9;
-	Byte flags10;
-	Byte flags11;
-	Byte flags12;
-	Byte flags13;
-	Byte flags14;
-	Byte flags15;
-} NesHdr;
-
-#define trainer(h) ((h)->flags6 >> 2 & 1)
-
 // ===== NES/6502 OPS ===== //
 
 typedef enum {
