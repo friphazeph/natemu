@@ -2,6 +2,8 @@
 #define CPU_H_
 
 #include "commons.h"
+#include "nes.h"
+#include <stdio.h>
 
 static inline void push(Byte b) {
 	ram[0x100 + SP] = b;

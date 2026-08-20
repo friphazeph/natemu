@@ -3,113 +3,166 @@
 in vec2 fragTexCoord;
 out vec4 finalColor;
 
-// --- Données NES ---
-uniform sampler2D chrRom;      // Texture contenant la CHR-ROM (ex: 256x256 pixels)
-uniform sampler2D vram;        // Texture 64x60 représentant les 4 Nametables (2x2)
-uniform sampler2D paletteRam;  // Texture 32x1 pour la Palette RAM (0x3F00)
-uniform vec4 systemPalette[12]; // Les 64 couleurs NES définies dans ton code [13]
+uniform int u_start_dot;
 
-// --- Registres PPU ---
-uniform int xScroll;
-uniform int yScroll;
-uniform int baseNt;            // 0, 1, 2, 3
-uniform int bgTableAddr;       // 0 ou 4096
-uniform int spriteTableAddr;
-uniform int spriteHeight;      // 8 ou 16
-uniform bool bgEnable;
-uniform bool spriteEnable;
+uniform sampler2D u_chr_tex; // 8 kb 256*32 or 128*64
+uniform sampler2D u_oam_tex; // 256 b 256*1
+uniform sampler2D u_vram_tex; // 2 kb 256*8
 
-// --- Masque de Rattrapage ---
-uniform int startDot;          // last_update
-uniform int endDot;            // up_to (cycles * 3)
+uniform int u_palette_ram[32];
+uniform vec3 u_nes_palette[64];
 
-// --- OAM (Sprites) ---
-struct Sprite {
-    int y;
-    int tile;
-    int attr;
-    int x;
+struct PPUState {
+    int x_scroll;
+    int y_scroll;
+    int base_nt;
+    int bg_table_addr;      // 0x0000 or 0x1000
+    int sprite_table_addr;  // 0x0000 or 0x1000
+    int sprite_height;      // 8 or 16
+    bool bg_enable;
+    bool sprite_enable;
 };
-uniform Sprite oam[12];
+
+uniform PPUState u_ppu;
+
+int read_vram(int addr) {
+    int offset = (addr - 0x2000) & 0x7FF;
+    ivec2 coord = ivec2(offset % 256, offset / 256);
+    return int(texelFetch(u_vram_tex, coord, 0).r * 255.0 + 0.5);
+}
+
+int read_oam(int offset) {
+    return int(texelFetch(u_oam_tex, ivec2(offset, 0), 0).r * 255.0 + 0.5);
+}
+
+int read_chr(int addr) {
+    ivec2 coord = ivec2(addr % 256, addr / 256);
+    return int(texelFetch(u_chr_tex, coord, 0).r * 255.0 + 0.5);
+}
 
 void main() {
-    int dot = int(fragTexCoord.x * 256.0);
-    int line = int(fragTexCoord.y * 240.0);
-    int currentPixelIndex = line * 256 + dot;
+    int px = int(gl_FragCoord.x);
+    int py = int(gl_FragCoord.y);
 
-    // --- APPLICATION DU MASQUE ---
-    if (currentPixelIndex < startDot || currentPixelIndex >= endDot) {
-        discard; 
+    int pixel_dot = (py * 341) + px;
+
+    if (pixel_dot < u_start_dot) {
+        discard;
     }
 
-    // Couleur de fond universelle [3]
-    vec4 bgPixel = systemPalette[int(texelFetch(paletteRam, isampler2D(0), 0).r * 255.0) & 0x3F];
-    int bgColorIndex = 0;
+	// -------------------------------------------------------------------------
+    // 1. Background Pixel Fetching
+    // -------------------------------------------------------------------------
+    int bg_color_index = 0;
+    vec3 bg_pixel = u_nes_palette[u_palette_ram[0] & 0x3F]; // Universal BG ($3F00)
 
-    // --- RENDU BACKGROUND [3-6] ---
-    if (bgEnable) {
-        int wx = dot + xScroll;
-        int wy = line + yScroll;
+    if (u_ppu.bg_enable) {
+        int wx = px + u_ppu.x_scroll;
+        int wy = py + u_ppu.y_scroll;
 
-        int totalTileX = (wx / 8) + ((baseNt & 1) * 32);
-        int totalTileY = (wy / 8) + ((baseNt & 2) != 0 ? 30 : 0);
+        // Global tile coordinates factoring in starting nametable
+        int total_tile_x = (wx >> 3) + ((u_ppu.base_nt & 1) * 32);
+        int total_tile_y = (wy >> 3) + (((u_ppu.base_nt & 2) != 0) ? 30 : 0);
 
-        int tileX = totalTileX % 32;
-        int tileY = totalTileY % 30;
-        
-        // Nametable fetch
-        int ntX = (totalTileX / 32) % 2;
-        int ntY = (totalTileY / 30) % 2;
-        int tileIndex = int(texelFetch(vram, ivec2(tileX + ntX*32, tileY + ntY*30), 0).r * 255.0);
+        int tile_x = total_tile_x % 32;
+        int tile_y = total_tile_y % 30;
 
-        // Attribute fetch [5]
-        int attrX = tileX / 4;
-        int attrY = tileY / 4;
-        int attr = int(texelFetch(vram, ivec2(attrX + ntX*32, attrY + ntY*30 + 0x3C0/32), 0).r * 255.0);
-        int palShift = ((tileY & 2) << 1) | (tileX & 2);
-        int palOffset = (attr >> palShift) & 0x03;
+        // Resolve nametable base address with screen wrapping
+        int nt_base = 0x2000;
+        if ((total_tile_x & 32) != 0)       nt_base |= 0x400;
+        if (((total_tile_y / 30) & 1) != 0) nt_base |= 0x800;
 
-        // Pixel fetch depuis CHR-ROM [6]
-        int fineX = wx % 8;
-        int fineY = wy % 8;
-        // Simulé ici : lecture des deux plans de bits
-        // En pratique, chrRom doit être mappée pour que texelFetch(tileIndex, fineX, fineY) fonctionne
-        // bgColorIndex = ...
-        
-        if (bgColorIndex > 0) {
-            int palAddr = (palOffset * 4) + bgColorIndex;
-            bgPixel = systemPalette[int(texelFetch(paletteRam, isampler2D(palAddr), 0).r * 255.0) & 0x3F];
+        // Fetch tile byte and attribute byte from VRAM
+        int tile_addr = nt_base + (tile_y * 32) + tile_x;
+        int tile      = read_vram(tile_addr);
+
+        int attr_addr = (nt_base | 0x03C0) + ((tile_y >> 2) * 8) + (tile_x >> 2);
+        int attr      = read_vram(attr_addr);
+
+        int pal_shift  = ((tile_y & 2) << 1) | (tile_x & 2);
+        int pal_offset = (attr >> pal_shift) & 0x03;
+
+        // Fetch fine offsets & tile pattern bitplanes
+        int fine_x = wx & 7;
+        int fine_y = wy & 7;
+
+        int plane0_addr = u_ppu.bg_table_addr + (tile * 16) + fine_y;
+        int low         = read_chr(plane0_addr);
+        int high        = read_chr(plane0_addr + 8);
+
+        int bit = 7 - fine_x;
+        bg_color_index = (((high >> bit) & 1) << 1) | ((low >> bit) & 1);
+
+        if (bg_color_index != 0) {
+            int pal_addr = 0x3F00 + (pal_offset * 4) + bg_color_index;
+            bg_pixel = u_nes_palette[u_palette_ram[(pal_addr - 0x3F00) & 0x1F] & 0x3F];
         }
     }
 
-    // --- RENDU SPRITES [7-10] ---
-    vec4 spritePixel = vec4(0.0);
-    bool spritePriority = false;
+    // -------------------------------------------------------------------------
+    // 2. Sprite Pixel Fetching
+    // -------------------------------------------------------------------------
+    vec3 sprite_pixel    = vec3(0.0);
+    bool sprite_drawn    = false;
+    bool sprite_priority = false; // false = in front of BG
 
-    if (spriteEnable) {
+    if (u_ppu.sprite_enable) {
         for (int s = 0; s < 64; s++) {
-            int sy = oam[s].y;
-            int sx = oam[s].x;
-            if (dot < sx || dot >= sx + 8) continue;
-            
-            int row = line - sy - 1;
-            if (row < 0 || row >= spriteHeight) continue;
+            int sy    = read_oam(s * 4 + 0); // Y position (top - 1)
+            int stile = read_oam(s * 4 + 1); // Tile index
+            int sattr = read_oam(s * 4 + 2); // Attributes
+            int sx    = read_oam(s * 4 + 3); // X position
 
-            // Logique de flip et de table [8, 9]
-            // int sColorIndex = fetch_from_chr(oam[s].tile, row, dot-sx, ...);
-            
-            // if (sColorIndex > 0) {
-            //    spritePixel = ...
-            //    spritePriority = (oam[s].attr & 0x20) != 0;
-            //    break;
-            // }
+            // X bounding check
+            if (px < sx || px >= sx + 8) continue;
+
+            // Y bounding check
+            int row = py - sy - 1;
+            if (row < 0 || row >= u_ppu.sprite_height) continue;
+
+            bool flip_h = (sattr & 0x40) != 0;
+            bool flip_v = (sattr & 0x80) != 0;
+            int  s_pal  = sattr & 0x03;
+
+            if (flip_v) row = u_ppu.sprite_height - 1 - row;
+
+            int s_table;
+            int s_tile_idx;
+
+            if (u_ppu.sprite_height == 16) {
+                // 8x16 Mode: Bit 0 selects pattern table
+                s_table    = ((stile & 1) != 0) ? 0x1000 : 0x0000;
+                s_tile_idx = stile & 0xFE;
+                if (row >= 8) { s_tile_idx++; row -= 8; }
+            } else {
+                s_table    = u_ppu.sprite_table_addr;
+                s_tile_idx = stile;
+            }
+
+            int s_plane0 = s_table + (s_tile_idx * 16) + row;
+            int s_low    = read_chr(s_plane0);
+            int s_high   = read_chr(s_plane0 + 8);
+
+            int s_bit         = flip_h ? (px - sx) : (7 - (px - sx));
+            int s_color_index = (((s_high >> s_bit) & 1) << 1) | ((s_low >> s_bit) & 1);
+
+            if (s_color_index == 0) continue; // Transparent pixel
+
+            int s_pal_addr  = 0x3F10 + (s_pal * 4) + s_color_index;
+            sprite_pixel    = u_nes_palette[u_palette_ram[(s_pal_addr - 0x3F00) & 0x1F] & 0x3F];
+            sprite_priority = (sattr & 0x20) != 0; // 1 = behind BG
+            sprite_drawn    = true;
+            break; // First non-transparent sprite in OAM wins
         }
     }
 
-    // --- COMPOSITION FINALE [11] ---
-    if (spritePixel.a > 0.0 && (!spritePriority || bgColorIndex == 0)) {
-        finalColor = spritePixel;
-    } else {
-        finalColor = bgPixel;
+    // -------------------------------------------------------------------------
+    // 3. Pixel Composition
+    // -------------------------------------------------------------------------
+    vec3 final_pixel = bg_pixel;
+    if (sprite_drawn && (!sprite_priority || bg_color_index == 0)) {
+        final_pixel = sprite_pixel;
     }
+
+    finalColor = vec4(final_pixel, 1.0);
 }
