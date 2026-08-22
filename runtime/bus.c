@@ -40,8 +40,9 @@ inline void ppu_write_reg(Addr addr, Byte value) {
 			PPU.nmi_enable = value >> 7;
 
 			if (!nmi_old && PPU.nmi_enable) {
-				if (PPU.vblank)
+				if (PPU.vblank && !PPU.replaying) {
 					trigger_nmi();
+				}
 			}
 			break;
 		case 1: // PPU MASK

@@ -123,9 +123,9 @@ static void update_ppu_events(uint64_t prev_dot, uint64_t current_dot) {
 
         if (frame_dot == VBLANK_SET_DOT) {
             PPU.vblank = true;
-            if (PPU.nmi_enable) {
-                trigger_nmi();
-            }
+            // if (PPU.nmi_enable) {
+            //     trigger_nmi();
+            // }
         } else if (frame_dot == VBLANK_CLEAR_DOT) {
             PPU.vblank = false;
             PPU.sprite0hit = false;
@@ -137,7 +137,7 @@ static void update_ppu_events(uint64_t prev_dot, uint64_t current_dot) {
 void check_sprite0_hit(uint64_t start_dot, uint64_t end_dot) {
     if (PPU.sprite0hit || !PPU.bg_enable || !PPU.sprite_enable) return;
 
-	uint8_t sy   = PPU.oam[0] + 1;
+	int sy       = (int)PPU.oam[0] + 1;
 	uint8_t tile = PPU.oam[1];
 	uint8_t attr = PPU.oam[2];
 	uint8_t sx   = PPU.oam[3];
