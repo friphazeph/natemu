@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <raylib.h>
 
 typedef uint16_t Addr;
 typedef uint8_t  Byte;
@@ -48,5 +49,10 @@ COMDEF Byte APU_IO_reg[0x18];
 
 Byte cpu_read(Addr addr);
 void cpu_write(Addr addr, Byte val);
+
+#define PIXELS_W 256
+#define PIXELS_H 240
+
+COMDEF Color screen_buffer[PIXELS_H * PIXELS_W];
 
 #endif // COMMONS_H_

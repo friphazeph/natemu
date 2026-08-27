@@ -7,9 +7,6 @@
 #include <stdio.h>
 #include "commons.h"
 
-#define PIXELS_W 256
-#define PIXELS_H 240
-
 #define SCANLINES_PER_FRAME    262
 #define DOTS_PER_SCANLINE      341
 
