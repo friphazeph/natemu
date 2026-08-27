@@ -21,7 +21,7 @@ void run_for(size_t budget) {
 			interpret_pc();
 			continue;
 		}
-		// printf("0x%04X: 0x%04lX\n", PC, offs);
+
 		void (*branch)(size_t) = global_dispatch[offs];
 		if (!branch) {
 			interpret_pc();
@@ -29,6 +29,47 @@ void run_for(size_t budget) {
 			branch(offs);
 		}
 	}
+}
+
+static inline void run_line(unsigned int line_n) {
+	current_line = line_n;
+    cpu_cycles_line_start = total_cpu_cycles;
+    PPU.last_v_record_dot = 0;
+    int nth = line_n % 3;
+    int cycles = DOTS_PER_SCANLINE/3 + (nth != 0);
+
+	if (PPU.odd_frame) cycles--;
+	
+	if (PPU.sprite0hit_this_line) {
+		PPU.sprite0hit_this_line = false;
+		run_for(PPU.sprite0hit_dot / 3);
+		PPU.sprite0hit = true;
+		run_for(cycles - PPU.sprite0hit_dot / 3);
+	} else {
+		run_for(cycles);
+	}
+	
+	populate_shader_textures(line_n);
+}
+
+Texture2D run_frame(void) {
+	PPU.vblank = false;
+	PPU.sprite0hit = false;
+	PPU.sprite_overflow = false;
+	PPU.last_v_record_dot = 0;
+	PPU.odd_frame = !PPU.odd_frame;
+	populate_shader_textures(PRERENDER_LINE); 
+	for (size_t i = 0; i < SCANLINES_PER_FRAME; i++) {
+		if (i == 241) {
+			PPU.vblank = true;
+			if (PPU.nmi_enable) {
+				trigger_nmi();
+			}
+		}
+		run_line(i);
+	}
+
+	return ppu_get_texture();
 }
 
 void nes_init(void) {
@@ -123,8 +164,7 @@ void interpret_pc(void) {
 			ASL(MODE_ABS_X, operands);
 			break;
 		case BCC:
-            BCC(MODE_IMM, operands);
-            break;
+            BCC(MODE_IMM, operands); break;
 		case BCS:
             BCS(MODE_IMM, operands);
             break;

@@ -12,7 +12,9 @@
 typedef uint16_t Addr;
 typedef uint8_t  Byte;
 
+COMDEF unsigned int current_line;
 COMDEF uint64_t total_cpu_cycles;
+COMDEF uint64_t cpu_cycles_line_start;
 COMDEF int64_t cycle_budget;
 
 // REGISTERS

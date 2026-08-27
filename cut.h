@@ -127,6 +127,7 @@ void *cut__arr_reserve(void *p, size_t n, size_t it_sz);
 /* API */
 /* returns a reference */
 #define arr_pop(p) ((typeof(p)) cut__arr_pop(p, sizeof(p[0])))
+#define arr_last(p) ((p)[arr_len(p)-1])
 #define arr_clear(p) (hdr_of(arr_hdr, p)->len = 0)
 #define arr_new(T, ...) ((T *) cut__arr_new(sizeof(T), (cut__arr_new_args) {.init_cap = 0, __VA_ARGS__}))
 /* /!\ arr_append has a chance to invalidate old pointers. 

@@ -3,10 +3,6 @@
 #include "bus.h"
 #include "../cut.h"
 
-#define DOTS_PER_LINE  341
-#define LINES          262
-#define FRAME_DOTS     (LINES*DOTS_PER_LINE)
-
 static const float PALETTE[64 * 3] = {
     0x7C/255.0f, 0x7C/255.0f, 0x7C/255.0f,  0x00/255.0f, 0x00/255.0f, 0xFC/255.0f,  0x00/255.0f, 0x00/255.0f, 0xBC/255.0f,  0x44/255.0f, 0x28/255.0f, 0xBC/255.0f,
     0x94/255.0f, 0x00/255.0f, 0x84/255.0f,  0xA8/255.0f, 0x00/255.0f, 0x20/255.0f,  0xA8/255.0f, 0x10/255.0f, 0x00/255.0f,  0x88/255.0f, 0x14/255.0f, 0x00/255.0f,
@@ -29,376 +25,118 @@ static const float PALETTE[64 * 3] = {
     0x00/255.0f, 0xFC/255.0f, 0xFC/255.0f,  0xF8/255.0f, 0xD8/255.0f, 0xF8/255.0f,  0x00/255.0f, 0x00/255.0f, 0x00/255.0f,  0x00/255.0f, 0x00/255.0f, 0x00/255.0f
 };
 
-
 PPU_state PPU;
 
-typedef struct {
-    Shader shader;
-    RenderTexture2D framebuffer;
-    
-    // Texture memory buffers
-    Texture2D chr_tex;
-    Texture2D vram_tex;
-    Texture2D oam_tex;
+// ---- Loopy register (v/t) bit layout ----
+#define LOOPY_COARSE_X_MASK   0x001F
+#define LOOPY_COARSE_Y_MASK   0x03E0
+#define LOOPY_NT_MASK         0x0C00
+#define LOOPY_NT_X_BIT        0x0400
+#define LOOPY_NT_Y_BIT        0x0800
+#define LOOPY_FINE_Y_MASK     0x7000
 
-    // Uniform locations
-    int loc_start_dot;
-    int loc_vram_tex, loc_oam_tex, loc_chr_tex;
-    int loc_palette_ram, loc_nes_palette;
-    
-    // PPUState struct field locations
-    int loc_x_scroll, loc_y_scroll, loc_base_nt;
-    int loc_bg_table_addr, loc_sprite_table_addr;
-    int loc_sprite_height, loc_bg_enable, loc_sprite_enable;
+#define LOOPY_COARSE_X_SPAN   32       // coarse X wraps mod 32
+#define LOOPY_COARSE_Y_MAX    31
+#define LOOPY_COARSE_Y_WRAP   29
 
-    uint32_t last_gpu_dot;
-} PPU_GPU;
+#define LOOPY_HORI_RELOAD_MASK  (LOOPY_COARSE_X_MASK | LOOPY_NT_X_BIT)
+#define LOOPY_VERT_RELOAD_MASK  (LOOPY_FINE_Y_MASK | LOOPY_COARSE_Y_MASK | LOOPY_NT_Y_BIT)
 
-static PPU_GPU gpu;
+#define LOOPY_FINE_Y_STEP     0x1000
 
-void ppu_init(void) {
-	gpu.shader = LoadShader(NULL, "./runtime/ppu.fs");
-    gpu.framebuffer = LoadRenderTexture(256, 240);
+#define Y_INCREMENT_DOT       256
+#define HORI_RELOAD_DOT       257
+#define VERT_RELOAD_START_DOT 280
+#define VERT_RELOAD_END_DOT   304
 
-	int chr_height = (chr_rom_len > 0) ? (int)(chr_rom_len / 256) : 32;
-    Image chr_img = {
-        .data = (void*)chr_rom,
-        .width = 256,
-        .height = chr_height,
-        .mipmaps = 1,
-        .format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE
-    };
-    gpu.chr_tex = LoadTextureFromImage(chr_img);
+#define OAM_ATTR_FLIP_H_BIT      0x40
+#define OAM_ATTR_FLIP_V_BIT      0x80
+#define OAM_TILE16_BANK_BIT       0x01              // 0: $0000, 1: $1000
+#define OAM_TILE16_INDEX_MASK     0xFE               // top 7 bits select the tile pair
+#define OAM_TILE16_GET_BANK(t)    (((t) & OAM_TILE16_BANK_BIT) ? 0x1000 : 0x0000)
+#define OAM_TILE16_GET_INDEX(t)   ((t) & OAM_TILE16_INDEX_MASK)
 
-	Image vram_img = {
-		.data = PPU.vram,
-		.width = 256,
-		.height = 8,
-		.mipmaps = 1,
-		.format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE
-	};
-	gpu.vram_tex = LoadTextureFromImage(vram_img);
+// ---- Access macros ----
+#define LOOPY_GET_COARSE_X(r) ((r) & LOOPY_COARSE_X_MASK)
+#define LOOPY_GET_COARSE_Y(r) (((r) & LOOPY_COARSE_Y_MASK) >> 5)
+#define LOOPY_GET_FINE_Y(r)   (((r) & LOOPY_FINE_Y_MASK) >> 12)
+#define LOOPY_GET_NT(r)       (((r) & LOOPY_NT_MASK) >> 10)
+#define NT_ADDR_FROM_V(v) (0x2000 | ((v) & 0x0FFF))
+#define ATTR_ADDR_FROM_V(v) \
+    (0x23C0 | ((v) & LOOPY_NT_MASK) | (((v) >> 4) & 0x38) | (((v) >> 2) & 0x07))
+#define ATTR_QUADRANT_FROM_COARSE(coarse_x, coarse_y) \
+    ((((coarse_y) & 0x02) << 1) | ((coarse_x) & 0x02))
+#define ATTR_GET_PALETTE(byte, quadrant_shift) (((byte) >> (quadrant_shift)) & 0x03)
 
-	Image oam_img = {
-		.data = PPU.oam,
-		.width = 256,
-		.height = 1,
-		.mipmaps = 1,
-		.format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE
-	};
-	gpu.oam_tex = LoadTextureFromImage(oam_img);
-
-    gpu.loc_start_dot          = GetShaderLocation(gpu.shader, "u_start_dot");
-    gpu.loc_vram_tex           = GetShaderLocation(gpu.shader, "u_vram_tex");
-    gpu.loc_oam_tex            = GetShaderLocation(gpu.shader, "u_oam_tex");
-    gpu.loc_chr_tex            = GetShaderLocation(gpu.shader, "u_chr_tex");
-    gpu.loc_palette_ram        = GetShaderLocation(gpu.shader, "u_palette_ram");
-    gpu.loc_nes_palette        = GetShaderLocation(gpu.shader, "u_nes_palette");
-    
-    gpu.loc_x_scroll           = GetShaderLocation(gpu.shader, "u_ppu.x_scroll");
-    gpu.loc_y_scroll           = GetShaderLocation(gpu.shader, "u_ppu.y_scroll");
-    gpu.loc_base_nt            = GetShaderLocation(gpu.shader, "u_ppu.base_nt");
-    gpu.loc_bg_table_addr      = GetShaderLocation(gpu.shader, "u_ppu.bg_table_addr");
-    gpu.loc_sprite_table_addr  = GetShaderLocation(gpu.shader, "u_ppu.sprite_table_addr");
-    gpu.loc_sprite_height      = GetShaderLocation(gpu.shader, "u_ppu.sprite_height");
-    gpu.loc_bg_enable          = GetShaderLocation(gpu.shader, "u_ppu.bg_enable");
-    gpu.loc_sprite_enable      = GetShaderLocation(gpu.shader, "u_ppu.sprite_enable");
-
-    SetShaderValueV(gpu.shader, gpu.loc_nes_palette, PALETTE, SHADER_UNIFORM_VEC3, 64);
-
-    int tex_unit_chr = 0, tex_unit_vram = 1, tex_unit_oam = 2;
-    SetShaderValue(gpu.shader, gpu.loc_chr_tex,  &tex_unit_chr,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_vram_tex, &tex_unit_vram, SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_oam_tex,  &tex_unit_oam,  SHADER_UNIFORM_INT);
-
-    gpu.last_gpu_dot = 0;
+static inline bool is_rendering_line(unsigned int line) {
+    return line <= VISIBLE_LINE_MAX || line == PRERENDER_LINE;
 }
 
-#define VBLANK_SET_DOT   82182  // Line 241, Dot 1
-#define VBLANK_CLEAR_DOT 89002  // Line 261, Dot 1
+static inline void advance_coarse_x(uint16_t *v, unsigned int count) {
+    unsigned int total = LOOPY_GET_COARSE_X(*v) + count;
+    unsigned int new_coarse_x = total % LOOPY_COARSE_X_SPAN;
+    unsigned int wraps = total / LOOPY_COARSE_X_SPAN;
 
-static void update_ppu_events(uint64_t prev_dot, uint64_t current_dot) {
-    for (uint64_t dot = prev_dot; dot < current_dot; dot++) {
-        uint32_t frame_dot = dot % FRAME_DOTS;
-
-        if (frame_dot == VBLANK_SET_DOT) {
-            PPU.vblank = true;
-            // if (PPU.nmi_enable) {
-            //     trigger_nmi();
-            // }
-        } else if (frame_dot == VBLANK_CLEAR_DOT) {
-            PPU.vblank = false;
-            PPU.sprite0hit = false;
-            PPU.sprite_overflow = false;
-        }
+    *v = (*v & ~LOOPY_COARSE_X_MASK) | new_coarse_x;
+    if (wraps & 1) {
+        *v ^= LOOPY_NT_X_BIT;
     }
 }
 
-void check_sprite0_hit(uint64_t start_dot, uint64_t end_dot) {
-    if (PPU.sprite0hit || !PPU.bg_enable || !PPU.sprite_enable) return;
+static inline void increment_y(uint16_t *v) {
+    if ((*v & LOOPY_FINE_Y_MASK) != LOOPY_FINE_Y_MASK) {
+        *v += LOOPY_FINE_Y_STEP;
+		return;
+    }         
+	*v &= ~LOOPY_FINE_Y_MASK;
+	uint16_t coarse_y = LOOPY_GET_COARSE_Y(*v);
 
-	int sy       = (int)PPU.oam[0] + 1;
-	uint8_t tile = PPU.oam[1];
-	uint8_t attr = PPU.oam[2];
-	uint8_t sx   = PPU.oam[3];
-
-	for (uint64_t d = start_dot; d < end_dot; d++) {
-		uint32_t frame_dot = d % FRAME_DOTS;
-		int line  = frame_dot / DOTS_PER_LINE;
-		int dot_x = frame_dot % DOTS_PER_LINE;
-
-		if (dot_x < 1 || dot_x >= 256 || line >= 240) continue;
-		int px = dot_x - 1;
-		if (px < sx || px >= sx + 8) continue;
-		if (line < sy || line >= sy + PPU.sprite_height) continue;
-
-		int py  = line - sy;
-		int row = (attr & 0x80) ? (PPU.sprite_height - 1 - py) : py; // Flip V
-
-		uint16_t table = (PPU.sprite_height == 16) ? ((tile & 1) ? 0x1000 : 0x00) : PPU.sprite_table_addr;
-		uint8_t  idx   = (PPU.sprite_height == 16) ? ((tile & 0xFE) + (row >= 8 ? 1 : 0)) : tile;
-
-		uint8_t low  = ppu_read(table + (idx * 16) + (row % 8));
-		uint8_t high = ppu_read(table + (idx * 16) + (row % 8) + 8);
-
-		int s_bit   = (attr & 0x40) ? (px - sx) : (7 - (px - sx)); // Flip H, relative to sprite
-		int s_color = (((high >> s_bit) & 1) << 1) | ((low >> s_bit) & 1);
-		if (s_color == 0) continue;
-
-        // Fetch background color index at dot_x, PPU.line
-        int wx = px + PPU.x_scroll;
-        int wy = line + PPU.y_scroll;
-
-        int total_tx = (wx >> 3) + ((PPU.base_nt & 1) * 32);
-        int total_ty = (wy >> 3) + ((PPU.base_nt & 2) ? 30 : 0);
-
-        uint16_t nt = 0x2000 | ((total_tx & 32) ? 0x400 : 0) | (((total_ty / 30) & 1) ? 0x800 : 0);
-        uint8_t  bg_tile = ppu_read(nt + ((total_ty % 30) * 32) + (total_tx % 32));
-
-        uint8_t bg_low  = ppu_read(PPU.bg_table_addr + (bg_tile * 16) + (wy & 7));
-        uint8_t bg_high = ppu_read(PPU.bg_table_addr + (bg_tile * 16) + (wy & 7) + 8);
-
-        int bg_bit   = 7 - (wx & 7);
-        int bg_color = (((bg_high >> bg_bit) & 1) << 1) | ((bg_low >> bg_bit) & 1);
-
-        if (bg_color != 0) {
-            PPU.sprite0hit = true;
-            return;
-        }
-    }
-}
-
-void ppu_render_pass(int start_dot) {
-	uint32_t frame_dot = (uint32_t)start_dot % FRAME_DOTS;
-	if (frame_dot > 81754) return; // last active pixel: line 239, dot 255
-
-	UpdateTexture(gpu.vram_tex, PPU.vram);
-	UpdateTexture(gpu.oam_tex,  PPU.oam);
-
-    int palette_buf[32];
-    for (int i = 0; i < 32; i++) {
-        palette_buf[i] = PPU.palette_ram[i] & 0x3F;
-    }
-    SetShaderValueV(gpu.shader, gpu.loc_palette_ram, palette_buf, SHADER_UNIFORM_INT, 32);
-
-    int xs = PPU.x_scroll,          ys = PPU.y_scroll;
-    int nt = PPU.base_nt,           bg = PPU.bg_table_addr;
-    int sp = PPU.sprite_table_addr, sh = PPU.sprite_height;
-    int bge = PPU.bg_enable ? 1 : 0, spe = PPU.sprite_enable ? 1 : 0;
-
-    SetShaderValue(gpu.shader, gpu.loc_x_scroll,          &xs,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_y_scroll,          &ys,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_base_nt,           &nt,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_bg_table_addr,     &bg,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_sprite_table_addr, &sp,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_sprite_height,     &sh,  SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_bg_enable,         &bge, SHADER_UNIFORM_INT);
-    SetShaderValue(gpu.shader, gpu.loc_sprite_enable,     &spe, SHADER_UNIFORM_INT);
-
-    int s_dot = (int)frame_dot;
-    SetShaderValue(gpu.shader, gpu.loc_start_dot, &s_dot, SHADER_UNIFORM_INT);
-
-    BeginTextureMode(gpu.framebuffer);
-        BeginShaderMode(gpu.shader);
-            SetShaderValueTexture(gpu.shader, gpu.loc_chr_tex,  gpu.chr_tex);
-            SetShaderValueTexture(gpu.shader, gpu.loc_vram_tex, gpu.vram_tex);
-            SetShaderValueTexture(gpu.shader, gpu.loc_oam_tex,  gpu.oam_tex);
-            DrawRectangle(0, 0, 256, 240, WHITE);
-        EndShaderMode();
-    EndTextureMode();
-}
-
-void ppu_exec_cmd(PPU_cmd *c) {
-    uint64_t up_to = c ? c->at * 3 : total_cpu_cycles * 3;
-    int start_dot  = (int)(gpu.last_gpu_dot + up_to - PPU.last_update);
-    
-    check_sprite0_hit(gpu.last_gpu_dot, start_dot);
-    update_ppu_events(gpu.last_gpu_dot, start_dot);
-
-    PPU.last_update = up_to;
-
-    if (c) {
-        ppu_write_reg(c->addr, c->value);
-    }
-
-	ppu_render_pass(start_dot);
-    gpu.last_gpu_dot = start_dot;
-
-// 	while (PPU.last_update < up_to) {
-// 		if (PPU.dot == 0 && PPU.line == 0) {
-// 			PPU.sprite0hit = false;
-// 			PPU.vblank = false;
-// 		}
-// 		if (PPU.dot == 1 && PPU.line == 241) {
-// 			PPU.vblank = true;
-// 		}
-// 		if (PPU.vblank) goto incr;
-//
-// 		if (1 <= PPU.dot && PPU.dot <= 256) {
-// 			if (PPU.line < 240) {
-//
-// 				uint8_t bg_color_index = 0;
-// 				Color bg_pixel = palette[ppu_read(0x3F00) & 0x3F]; // universal BG
-//
-// 				if (PPU.bg_enable) {
-// 					int wx = (PPU.dot - 1) + PPU.x_scroll;
-// 					int wy = PPU.line + PPU.y_scroll;
-//
-// 					// 1. Calculate global tile positions factoring in the starting nametable
-// 					int total_tile_x = (wx >> 3) + ((PPU.base_nt & 1) * 32);
-// 					int total_tile_y = (wy >> 3) + ((PPU.base_nt & 2) ? 30 : 0);
-//
-// 					// 2. Wrap coordinates into local individual nametable indices
-// 					int tile_x = total_tile_x % 32;
-// 					int tile_y = total_tile_y % 30;
-//
-// 					// 3. Resolve the actual nametable base address
-// 					uint16_t nt_base = 0x2000;
-// 					if (total_tile_x & 32)       nt_base |= 0x400; // Toggle right nametable
-// 					if ((total_tile_y / 30) & 1) nt_base |= 0x800; // Toggle bottom nametable
-//
-// 					// 4. Fetch tile index from calculated VRAM position
-// 					uint16_t tile_addr = nt_base + (tile_y * 32) + tile_x;
-// 					uint8_t  tile      = ppu_read(tile_addr);
-//
-// 					// 5. Fetch attribute byte and calculate correct palette quadrant
-// 					uint16_t attr_addr = (nt_base | 0x03C0) + ((tile_y >> 2) * 8) + (tile_x >> 2);
-// 					uint8_t  attr      = ppu_read(attr_addr);
-//
-// 					int pal_shift     = ((tile_y & 2) << 1) | (tile_x & 2);
-// 					int pal_offset    = (attr >> pal_shift) & 0x03;
-//
-// 					// 6. Fine pixel offsets within the chosen tile
-// 					int fine_x = wx & 7;
-// 					int fine_y = wy & 7;
-//
-// 					uint16_t plane0_addr = PPU.bg_table_addr + (tile * 16) + fine_y;
-// 					uint8_t  low         = ppu_read(plane0_addr);
-// 					uint8_t  high        = ppu_read(plane0_addr + 8);
-//
-// 					int bit = 7 - fine_x;
-// 					bg_color_index = ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
-//
-// 					if (bg_color_index) {
-// 						uint16_t pal_addr = 0x3F00 + (pal_offset * 4) + bg_color_index;
-// 						bg_pixel = palette[ppu_read(pal_addr) & 0x3F];
-// 					}
-// 				}
-//
-// 				// Sprites
-// 				Color sprite_pixel    = {0};     // transparent
-// 				bool  sprite_priority = false;   // false = in front of BG
-// 				bool  sprite0_this_px = false;
-//
-// 				if (PPU.sprite_enable) {
-// 					int px = PPU.dot - 1;           // screen X (0-255)
-//
-// 					// Walk all 64 sprites; render the FIRST (lowest OAM index)
-// 					// non-transparent one that covers this pixel.
-// 					for (int s = 0; s < 64; s++) {
-// 						uint8_t sy    = PPU.oam[s * 4 + 0]; // Y position (top-1)
-// 						uint8_t stile = PPU.oam[s * 4 + 1]; // tile index
-// 						uint8_t sattr = PPU.oam[s * 4 + 2]; // attributes
-// 						uint8_t sx    = PPU.oam[s * 4 + 3]; // X position
-//
-// 						// Check X overlap
-// 						if (px < sx || px >= sx + 8) continue;
-//
-// 						// Check Y overlap
-// 						int row = PPU.line - (int)sy - 1; // sy is stored as (top - 1)
-// 						if (row < 0 || row >= PPU.sprite_height) continue;
-//
-// 						bool flip_h = (sattr & 0x40) != 0;
-// 						bool flip_v = (sattr & 0x80) != 0;
-// 						int  s_pal  = sattr & 0x03;
-//
-// 						if (flip_v) row = PPU.sprite_height - 1 - row;
-//
-// 						uint16_t s_table;
-// 						uint8_t  s_tile_idx;
-//
-// 						if (PPU.sprite_height == 16) {
-// 							// 8×16: tile bit 0 selects pattern table; top/bottom half
-// 							s_table    = (stile & 0x01) ? 0x1000 : 0x0000;
-// 							s_tile_idx = stile & 0xFE;
-// 							if (row >= 8) { s_tile_idx++; row -= 8; }
-// 						} else {
-// 							s_table    = PPU.sprite_table_addr;
-// 							s_tile_idx = stile;
-// 						}
-//
-// 						uint16_t s_plane0 = s_table + (s_tile_idx * 16) + row;
-// 						uint8_t  s_low    = ppu_read(s_plane0);
-// 						uint8_t  s_high   = ppu_read(s_plane0 + 8);
-//
-// 						int s_bit         = flip_h ? (px - sx) : (7 - (px - sx));
-// 						int s_color_index = (((s_high >> s_bit) & 1) << 1)
-// 							|  ((s_low  >> s_bit) & 1);
-//
-// 						if (s_color_index == 0) continue; // transparent
-//
-// 						uint16_t s_pal_addr = 0x3F10 + (s_pal * 4) + s_color_index;
-// 						sprite_pixel    = palette[ppu_read(s_pal_addr) & 0x3F];
-// 						sprite_priority = (sattr & 0x20) != 0; // 1 = behind BG
-// 						sprite0_this_px = (s == 0);
-// 						break; // first non-transparent sprite wins
-// 					}
-// 				}
-//
-// 				if (sprite0_this_px && bg_color_index && PPU.dot != 256) {
-// 					PPU.sprite0hit = true;
-// 				}
-//
-// 				Color final_pixel = bg_pixel;  // start with BG (or universal BG)
-// 				if (*(uint32_t *) &sprite_pixel && (!sprite_priority || !bg_color_index)) {
-// 					final_pixel = sprite_pixel;
-// 				}
-//
-// 				screen_buffer[256 * PPU.line + PPU.dot - 1] = final_pixel;
-// 			}
-//
-// 		} else if (PPU.dot <= 320) {
-// 			PPU.oam_addr = 0;
-// 		}
-//
-// incr:
-// 		PPU.last_update++;
-// 		PPU.dot++;
-// 		if (PPU.dot > 340) {
-// 			PPU.dot = 0;
-// 			PPU.line++;
-// 			if (PPU.line > 261)
-// 				PPU.line = 0;
-// 		}
-// 	}
-}
-
-void ppu_catch_up(void) {
-	arr_foreach(c, PPU.queue) {
-		ppu_exec_cmd(c);
+	switch (coarse_y) {
+		case LOOPY_COARSE_Y_WRAP:
+			coarse_y = 0;
+			*v ^= LOOPY_NT_Y_BIT;
+			break;
+		case LOOPY_COARSE_Y_MAX:
+			coarse_y = 0;
+			break;
+		default:
+			coarse_y += 1;
+			break;
 	}
-	if (PPU.queue) arr_clear(PPU.queue);
-	ppu_exec_cmd(NULL);
+	*v = (*v & ~LOOPY_COARSE_Y_MASK) | (coarse_y << 5);
+}
+
+void catch_up_v(unsigned int current_dot, unsigned int line) {
+    if (!(PPU.bg_enable || PPU.sprite_enable)) return;
+    if (!(line <= VISIBLE_LINE_MAX || line == PRERENDER_LINE)) return;
+
+    unsigned int lo = PPU.last_v_record_dot + 1;
+	unsigned int hi = current_dot;
+    if (lo > hi) return;
+
+    // Coarse X: count multiples of 8 in (last_dot, current_dot], clipped
+    // to the two fetch windows.
+    unsigned int steps = 0;
+    unsigned int a_hi = hi < FETCH_WINDOW_A_END ? hi : FETCH_WINDOW_A_END;
+    if (lo <= a_hi) steps += a_hi / 8 - (lo - 1) / 8;
+
+    if (hi >= FETCH_WINDOW_B_START) {
+        unsigned int b_lo = lo > FETCH_WINDOW_B_START ? lo : FETCH_WINDOW_B_START;
+        unsigned int b_hi = hi < FETCH_WINDOW_B_END ? hi : FETCH_WINDOW_B_END;
+        if (b_lo <= b_hi) steps += b_hi / 8 - (b_lo - 1) / 8;
+    }
+
+    if (steps) advance_coarse_x(&PPU.v, steps);
+
+    if (line != PRERENDER_LINE &&
+        lo <= Y_INCREMENT_DOT && Y_INCREMENT_DOT <= hi)
+        increment_y(&PPU.v);
+
+    if (lo <= HORI_RELOAD_DOT && HORI_RELOAD_DOT <= hi)
+        PPU.v = (PPU.v & ~LOOPY_HORI_RELOAD_MASK) | (PPU.t & LOOPY_HORI_RELOAD_MASK);
+
+    if (line == PRERENDER_LINE && lo <= VERT_RELOAD_END_DOT && hi >= VERT_RELOAD_START_DOT)
+        PPU.v = (PPU.v & ~LOOPY_VERT_RELOAD_MASK) | (PPU.t & LOOPY_VERT_RELOAD_MASK);
 }
 
 void trigger_nmi(void) {
@@ -415,6 +153,392 @@ void trigger_nmi(void) {
 	total_cpu_cycles += 7;
 }
 
+Byte ppu_read_reg(Addr addr) {
+	uint8_t ret;
+	switch (addr & 0x7) {
+		case 2: // PPU STATUS
+			ret = (PPU.vblank << 7) 
+				| (PPU.sprite0hit << 6) 
+				| (PPU.sprite_overflow << 5);
+			PPU.vblank = false;
+			PPU.w = false;
+			// if (PPU.vblank)
+			// 	printf("vblank !\n");
+			return ret;
+			break;
+		case 4: // OAM DATA
+			return PPU.oam[PPU.oam_addr];
+		case 7: // PPU DATA
+			unsigned int dot = (total_cpu_cycles - cpu_cycles_line_start) * 3;
+			ret = PPU.buffer;
+			catch_up_v(dot, current_line);
+			PPU.buffer = ppu_read(PPU.v & 0x7FFF);
+
+			PPU.v += PPU.increment;
+
+			PPU.last_v_record_dot = dot;
+			size_t index = (dot) / 8;
+			if (index < 32)
+				PPU.v_record[index] = (VRecord) {.changed = true, .value = PPU.v};
+			return ret;
+	}
+	return 0;
+}
+
+inline void ppu_write_reg(Addr addr, Byte value) {
+	switch (addr & 0x7) {
+		case 0: // PPU CTRL
+			{
+				bool nmi_old = PPU.nmi_enable;
+				PPU.t = (PPU.t & ~LOOPY_NT_MASK) | ((value & 0x03) << 10);
+				PPU.increment = (value & 0x04) ? 32 : 1;
+				PPU.sprite_table_addr = (value & 0x08) ? 0x1000 : 0x0;
+				PPU.bg_table_addr = (value & 0x10) ? 0x1000 : 0x0;
+				PPU.sprite_height = (value & 0x20) ? 16 : 8;
+				PPU.nmi_enable = value >> 7;
+
+				if (!nmi_old && PPU.nmi_enable) {
+					if (PPU.vblank) {
+						trigger_nmi();
+					}
+				}
+			}
+			break;
+		case 1: // PPU MASK
+			PPU.bg_enable = (value & 0x10) != 0;
+			PPU.sprite_enable = (value & 0x08) != 0;
+			PPU.bg_left_enable = (value & 0x02) != 0;
+			PPU.sprite_left_enable = (value & 0x04) != 0;
+			break;
+		case 3: // PPU OAM ADDR
+			PPU.oam_changed = true;
+			PPU.oam_addr = value;
+			break;
+		case 4:
+			PPU.oam_changed = true;
+			PPU.oam[PPU.oam_addr++] = value;
+			break;
+		case 5: // PPU SCROLL
+			catch_up_v((total_cpu_cycles - cpu_cycles_line_start) * 3, current_line);
+			if (PPU.w) {
+				PPU.t = (PPU.t & 0x0C1F) | (((uint16_t) value & 0x07) << 12) | (((uint16_t) value & 0xF8) << 2);
+				PPU.w = false;
+			} else {
+				PPU.t = (PPU.t & ~0b11111) | value >> 3;
+				PPU.x = value & 0b111;
+				PPU.w = true;
+			}
+			break;
+		case 6: 
+			if (!PPU.w) {
+				// First write: high byte
+				PPU.t = (PPU.t & 0x00FF) | ((value & 0x3F) << 8);
+				PPU.w = true;
+			} else {
+				// Second write: low byte
+				PPU.t = (PPU.t & 0xFF00) | value;
+				PPU.v = PPU.t; // Current VRAM pointer updates to match temporary pointer
+				PPU.last_v_record_dot = (total_cpu_cycles - cpu_cycles_line_start) * 3;
+				size_t index = (PPU.last_v_record_dot) / 8;
+				if (index < 32)
+					PPU.v_record[index] = (VRecord) {.changed = true, .value = PPU.v};
+				PPU.w = false;
+			}
+			break;
+		case 7: // PPU DATA
+			unsigned int dot = (total_cpu_cycles - cpu_cycles_line_start) * 3;
+			if (dot > 340) dot = 340;
+			catch_up_v(dot, current_line);
+			ppu_write(PPU.v & 0x7FFF, value);
+			PPU.v += PPU.increment;
+			PPU.last_v_record_dot = dot;
+			size_t index = (dot) / 8;
+			if (index < 32)
+				PPU.v_record[index] = (VRecord) {.changed = true, .value = PPU.v};
+			break;
+	}
+}
+
+// ===== Shader textures (packed RGBA8) =====
+static Byte bg_tex  [32 * 240 * 4];  // R=lo  G=hi  B=attr
+static Byte spr_tex [ 8 * 240 * 4];  // R=y   G=x   B=attr  A=tile
+static Byte misc_tex[32 * 240 * 4];  // R=pal G=fine_x B=spr_count
+// CPU-side only, packed into misc_tex at upload time:
+static Byte spr_count[240];
+static Byte fine_x[240];
+static Byte pal_ram[32 * 240];
+
+void populate_bg_textures(unsigned int n) {
+	uint16_t running_v = 0; // except for the very first line of the first frame, this will be overwritten
+	if (n < 240) {
+		for (size_t i = 0; i < 32; i++) {
+			VRecord r = PPU.v_record[i];
+			if (r.changed)
+				running_v = r.value;
+
+			uint16_t nt_addr = NT_ADDR_FROM_V(running_v);
+			int tile_index = ppu_read(nt_addr);
+			size_t o = (32*n + i) * 4;
+			{ // attr
+				uint16_t attr_addr = ATTR_ADDR_FROM_V(running_v);
+				Byte attr_byte = ppu_read(attr_addr);
+				uint8_t coarse_x = LOOPY_GET_COARSE_X(running_v);
+				uint8_t coarse_y = LOOPY_GET_COARSE_Y(running_v);
+				uint8_t quadrant = ATTR_QUADRANT_FROM_COARSE(coarse_x, coarse_y);
+				bg_tex[o + 2] = ATTR_GET_PALETTE(attr_byte, quadrant);
+			}
+			{ // pattern
+				Byte fine_y = LOOPY_GET_FINE_Y(running_v);
+				uint16_t pattern_addr = PPU.bg_table_addr | (tile_index << 4) | fine_y;
+				bg_tex[o + 0] = ppu_read(pattern_addr);
+				bg_tex[o + 1] = ppu_read(pattern_addr | 0x8);
+			}
+
+			advance_coarse_x(&running_v, 1);
+		}
+	}
+
+	catch_up_v(339, n);
+	memset(PPU.v_record, 0, sizeof(VRecord) * 32);
+	PPU.v_record[0] = (VRecord) { .changed = true, .value = PPU.v };
+}
+
+void check_sprite0_hit_speculative(unsigned int n) {
+    if (PPU.sprite0hit) return;
+    if (!(PPU.bg_enable && PPU.sprite_enable)) return;
+
+	unsigned int next_line = (n == PRERENDER_LINE) ? 0 : n + 1;
+	if (next_line >= 240) return; 
+
+    Byte y = PPU.oam[0], tile = PPU.oam[1], attr = PPU.oam[2], sx = PPU.oam[3];
+    if (y >= 240) return; // off-screen sentinel
+
+    int top = y + 1;
+    int bottom = top + PPU.sprite_height - 1;
+    if ((int)next_line < top || (int)next_line > bottom) return;
+
+    int row = next_line - top;
+    if (attr & OAM_ATTR_FLIP_V_BIT) row = (PPU.sprite_height - 1) - row;
+
+    uint16_t addr;
+    if (PPU.sprite_height == 8) {
+        addr = PPU.sprite_table_addr | (tile << 4) | row;
+    } else {
+        uint16_t bank = OAM_TILE16_GET_BANK(tile);
+        uint16_t base_index = tile & OAM_TILE16_INDEX_MASK;
+        uint16_t sub_tile = (row >= 8) ? 1 : 0;
+        addr = bank | ((base_index + sub_tile) << 4) | (row & 0x7);
+    }
+
+    Byte sp_lo = ppu_read(addr);
+	Byte sp_hi = ppu_read(addr | 8);
+    uint16_t v = PPU.v; // speculative baseline: v as of start of this line
+
+    for (int dx = 0; dx < 8; dx++) {
+        int px = sx + dx;
+        if (px >= 255) break;
+        if (px < 8 && (!PPU.bg_left_enable || !PPU.sprite_left_enable))
+            continue;
+
+        int sbit = (attr & OAM_ATTR_FLIP_H_BIT) ? dx : 7 - dx;
+        int sp_pixel = ((sp_hi >> sbit) & 1) << 1 | ((sp_lo >> sbit) & 1);
+        if (sp_pixel == 0) continue;
+
+		uint16_t tile_v = v;
+		int physical_px = px + PPU.x;
+		advance_coarse_x(&tile_v, physical_px / 8);
+		int bit_in_tile = 7 - (physical_px % 8);
+
+        int tile_index = ppu_read(NT_ADDR_FROM_V(tile_v));
+        Byte fine_y = LOOPY_GET_FINE_Y(tile_v);
+        uint16_t paddr = PPU.bg_table_addr | (tile_index << 4) | fine_y;
+        Byte lo = ppu_read(paddr), hi = ppu_read(paddr | 8);
+        int bg_pixel = ((hi >> bit_in_tile) & 1) << 1 | ((lo >> bit_in_tile) & 1);
+        if (bg_pixel == 0) continue;
+
+        PPU.sprite0hit_this_line = true;
+        PPU.sprite0hit_dot = px + 2;
+        break;
+    }
+}
+
+void populate_spr_textures(unsigned int n) {
+    if (!(n == PRERENDER_LINE || PPU.oam_changed)) return;
+    if (!(n == PRERENDER_LINE || (n <= 238))) return;
+
+    int first_line_to_clear = n == PRERENDER_LINE ? 0 : n + 1;
+    for (int L = first_line_to_clear; L <= 239; L++) {
+        spr_count[L] = 0;
+    }
+
+    for (int s = 0; s < 64; s++) {
+        Byte y    = PPU.oam[4*s + 0];
+        Byte tile = PPU.oam[4*s + 1];
+        Byte attr = PPU.oam[4*s + 2];
+        Byte x    = PPU.oam[4*s + 3];
+
+        if (y >= 240) continue;
+
+        int top = y + 1; // sprite's first visible scanline
+        int bottom = top + PPU.sprite_height - 1;
+
+        int lo = top > first_line_to_clear ? top : first_line_to_clear;
+        int hi = bottom < 239 ? bottom : 239;
+
+        for (int L = lo; L <= hi; L++) {
+			if (spr_count[L] < 8) {
+                uint8_t slot = spr_count[L]++;
+                size_t o = (8*L + slot) * 4;
+                spr_tex[o + 0] = y;
+                spr_tex[o + 1] = x;
+                spr_tex[o + 2] = attr;
+                spr_tex[o + 3] = tile;
+            } else {
+                PPU.sprite_overflow = true;
+            }
+        }
+    }
+
+    PPU.oam_changed = false;
+}
+
+void populate_scroll_textures(unsigned int n) {
+	if (!(n == PRERENDER_LINE || n < 239)) return;
+	fine_x[(n+1) % 262] = PPU.x;
+}
+void populate_pal_ram_texture(unsigned int n) {
+	if (!(n == PRERENDER_LINE || n < 239)) return;
+	size_t target_i = ((n+1) % 262) * 32;
+	memcpy(&pal_ram[target_i], PPU.pal_ram, 32);
+}
+
+static void pack_misc_tex(void) {
+    for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 32; x++) {
+            size_t o = (y * 32 + x) * 4;
+            misc_tex[o + 0] = pal_ram[y * 32 + x];
+            misc_tex[o + 1] = fine_x[y];
+            misc_tex[o + 2] = spr_count[y];
+            misc_tex[o + 3] = 0;
+        }
+    }
+}
+
+void populate_shader_textures(unsigned int n) {
+	populate_bg_textures(n);
+	check_sprite0_hit_speculative(n);
+	populate_spr_textures(n);
+	populate_scroll_textures(n);
+	populate_pal_ram_texture(n);
+}
+
+typedef struct {
+	Texture2D dummy_tex;
+
+    Shader shader;
+    RenderTexture2D framebuffer; // 256x240 output target
+	
+	Texture2D bg_tex;
+    Texture2D spr_tex;
+    Texture2D misc_tex;
+    Texture2D chr_rom;
+
+    int loc_bg_tex;
+    int loc_spr_tex;
+    int loc_misc_tex;
+    int loc_chr_rom;
+	int loc_sprite_table_addr;
+	int loc_sprite_height;
+    int loc_nes_palette;
+} GPU_state;
+
+static GPU_state gpu;
+
+static Texture2D make_rgba_texture(int w, int h) {
+    Image img = {
+        .data = calloc((size_t)w * h * 4, 1),
+        .width = w,
+        .height = h,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+    Texture2D tex = LoadTextureFromImage(img);
+    SetTextureFilter(tex, TEXTURE_FILTER_POINT);
+    SetTextureWrap(tex, TEXTURE_WRAP_CLAMP);
+    UnloadImage(img);
+    return tex;
+}
+
+static Texture2D make_byte_texture(int w, int h) {
+    Image img = {
+        .data = calloc((size_t)w * h, 1),
+        .width = w,
+        .height = h,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE
+    };
+    Texture2D tex = LoadTextureFromImage(img);
+    SetTextureFilter(tex, TEXTURE_FILTER_POINT); // these are indices/data, never interpolate
+    SetTextureWrap(tex, TEXTURE_WRAP_CLAMP);
+    UnloadImage(img);
+    return tex;
+}
+
+void ppu_init(void) {
+    gpu.shader = LoadShader(0, "runtime/ppu.fs");
+
+    gpu.framebuffer = LoadRenderTexture(256, 240);
+    SetTextureFilter(gpu.framebuffer.texture, TEXTURE_FILTER_POINT);
+
+	gpu.bg_tex   = make_rgba_texture(32, 240);
+    gpu.spr_tex  = make_rgba_texture(8, 240);
+    gpu.misc_tex = make_rgba_texture(32, 240);
+    gpu.chr_rom  = make_byte_texture(128, 64);
+
+    gpu.loc_bg_tex   = GetShaderLocation(gpu.shader, "u_bg_tex");
+    gpu.loc_spr_tex  = GetShaderLocation(gpu.shader, "u_spr_tex");
+    gpu.loc_misc_tex = GetShaderLocation(gpu.shader, "u_misc_tex");
+    gpu.loc_chr_rom  = GetShaderLocation(gpu.shader, "u_chr_rom_tex");
+
+	gpu.loc_nes_palette       = GetShaderLocation(gpu.shader, "u_nes_palette");
+	gpu.loc_sprite_height     = GetShaderLocation(gpu.shader, "u_sprite_height");
+	gpu.loc_sprite_table_addr = GetShaderLocation(gpu.shader, "u_sprite_table_addr");
+
+	SetShaderValueV(gpu.shader, gpu.loc_nes_palette, PALETTE, SHADER_UNIFORM_VEC3, 64);
+
+	Image white_img = GenImageColor(1, 1, WHITE);
+    gpu.dummy_tex = LoadTextureFromImage(white_img);
+    SetTextureFilter(gpu.dummy_tex, TEXTURE_FILTER_POINT);
+    UnloadImage(white_img);
+
+}
+
 Texture2D ppu_get_texture(void) {
-	return gpu.framebuffer.texture;
+    pack_misc_tex();
+    UpdateTexture(gpu.bg_tex,   bg_tex);
+    UpdateTexture(gpu.spr_tex,  spr_tex);
+    UpdateTexture(gpu.misc_tex, misc_tex);
+    UpdateTexture(gpu.chr_rom,  chr_rom);
+
+    BeginTextureMode(gpu.framebuffer);
+        ClearBackground(BLACK);
+        BeginShaderMode(gpu.shader);
+            SetShaderValueTexture(gpu.shader, gpu.loc_bg_tex,   gpu.bg_tex);
+            SetShaderValueTexture(gpu.shader, gpu.loc_spr_tex,  gpu.spr_tex);
+            SetShaderValueTexture(gpu.shader, gpu.loc_misc_tex, gpu.misc_tex);
+            SetShaderValueTexture(gpu.shader, gpu.loc_chr_rom,  gpu.chr_rom);
+
+            int sprite_height_val = PPU.sprite_height;
+            int sprite_table_addr_val = PPU.sprite_table_addr;
+            SetShaderValue(gpu.shader, gpu.loc_sprite_height, &sprite_height_val, SHADER_UNIFORM_INT);
+            SetShaderValue(gpu.shader, gpu.loc_sprite_table_addr, &sprite_table_addr_val, SHADER_UNIFORM_INT);
+
+            DrawTexturePro(gpu.dummy_tex,
+               (Rectangle){ 0, 0, 1, 1 },
+               (Rectangle){ 0, 0, 256, 240 },
+               (Vector2){ 0, 0 }, 0.0f, WHITE);
+        EndShaderMode();
+    EndTextureMode();
+
+    return gpu.framebuffer.texture;
 }

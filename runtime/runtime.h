@@ -2,10 +2,11 @@
 #define RUNTIME_H_
 
 #include <stddef.h>
+#include <raylib.h>
 
 extern void (*const global_dispatch[])(size_t offs);
 
-void run_for(size_t budget);
+Texture2D run_frame(void);
 void nes_init(void);
 void interpret_pc(void);
 
