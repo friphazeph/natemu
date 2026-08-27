@@ -19,8 +19,6 @@
 #include "../cut.h"
 #include "nesparser.h"
 
-#define ROMS_DIR "./roms/"
-
 void print_instr_c(Instr ins) {
 	Op op = OPS[ins.op];
 	printf("\tcase 0x%04lX:\n", ins.offs);
@@ -102,10 +100,13 @@ void parsed_to_c(NesParser *p) {
 	free(starts);
 }
 
-int main(void) {
-	// NesParser p = parse_file(ROMS_DIR"nestest.nes");
-	NesParser p = parse_file(ROMS_DIR"SMB.nes");
-	// NesParser p = parse_file(ROMS_DIR"nes-test-roms/instr_test-v5/rom_singles/16-special.nes");
-	parsed_to_c(&p);
-	return 0;
-} 
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <path_to_rom.nes>\n", argv[0]);
+        return 1;
+    }
+    
+    NesParser p = parse_file(argv[1]);
+    parsed_to_c(&p);
+    return 0;
+}
