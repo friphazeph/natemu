@@ -3,6 +3,8 @@ CFLAGS    := -Wall -Wextra -Werror -Wno-override-init -Wno-unused \
              -I. -I./runtime -I./frontend -I./recompiler
 BUILD_DIR := ./build
 
+ROM ?= test.rom
+
 # Recompiler source and object definitions
 RECOMP_SRCS  := recompiler/nesparser.c recompiler/nesrom.c recompiler/c_emitter.c
 RECOMP_OBJS  := $(patsubst %.c,$(BUILD_DIR)/%.o,$(RECOMP_SRCS))
@@ -31,7 +33,7 @@ $(BUILD_DIR)/nesparser: $(RECOMP_OBJS) | $(BUILD_DIR)
 
 # 2. Code Generation Step: Runs recompiler executable to produce game.c
 $(BUILD_DIR)/game.c: $(BUILD_DIR)/nesparser
-	$(BUILD_DIR)/nesparser > $@
+	$(BUILD_DIR)/nesparser $(ROM) > $@
 
 # 3. Game Logic Object: Compiles generated game.c into game.o
 $(BUILD_DIR)/game.o: $(BUILD_DIR)/game.c | $(BUILD_DIR)
