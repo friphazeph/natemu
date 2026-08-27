@@ -24,7 +24,7 @@
 #define SCALE 6
 
 int main(void) {
-	InitWindow(PIXELS_W * SCALE, PIXELS_H * SCALE, "SMB recomp");
+	InitWindow(PIXELS_W * SCALE, PIXELS_H * SCALE, "natemu");
 	SetTargetFPS(60);
 
 	ppu_init();
