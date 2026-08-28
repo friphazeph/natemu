@@ -213,8 +213,8 @@ void *cut__ring_push(Ring *r, void *it);
 void *cut__ring_pop(Ring *r);
 
 #define ring_new(T, count, ...) cut__ring_new(count, sizeof(T), (cut__ring_new_args) {.alloc = NULL, __VA_ARGS__})
-#define ring_push(r, it) ((typeof(it) *) cut__ring_push(r, STACK_REF(it))
-#define ring_pop(T, r) (((T *) cut__ring_pop(r))
+#define ring_push(r, it) ((typeof(it) *) cut__ring_push(r, STACK_REF(it)))
+#define ring_pop(T, r) (((T *) cut__ring_pop(r)))
 
 /* ===== Hash Maps ===== */
 
